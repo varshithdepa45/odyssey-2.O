@@ -1,149 +1,94 @@
-# Firebase Setup Guide for Campus Lost & Found
+# Firebase Setup — The Baker Street Hunt
 
-This guide will walk you through setting up Firebase for your lost-and-found website.
+The Firebase config lives at the top of `src/app.jsx` (`firebaseConfig`). Enable **Authentication → Email/Password** and **Firestore** in the Firebase Console.
 
-## Step 1: Create a Firebase Project
+## Collections
 
-1. Go to [Firebase Console](https://console.firebase.google.com/)
-2. Click **"Add project"**
-3. Enter project name: `campus-lost-found`
-4. Click **"Continue"**
-5. Disable Google Analytics (optional)
-6. Click **"Create project"**
+### `teams/{uid}`
 
-Wait 2-3 minutes for the project to be created.
+One document per signed-in account; the document id is the Firebase Auth uid.
 
-## Step 2: Enable Firestore Database
+| Field | Type | Notes |
+| --- | --- | --- |
+| `teamName` | string | Shown on the leaderboard |
+| `score` | number | +100 per solved clue |
+| `cluesSolved` | number | Also the unlock cursor: clue number `cluesSolved + 1` is the open case |
+| `lastSolvedAt` | timestamp \| null | Leaderboard tie-breaker (earlier wins) |
 
-1. In the Firebase Console, click your project
-2. Go to **"Build"** → **"Firestore Database"**
-3. Click **"Create database"**
-4. Select **"Start in test mode"** (for development)
-   - ⚠️ **For production**: Later, change security rules to restrict access
-5. Choose location closest to your college
-6. Click **"Create"**
+### `clues/{id}`
 
-## Step 3: Enable Authentication
+| Field | Type | Notes |
+| --- | --- | --- |
+| `id` | string | Same as the document id |
+| `order` | number | 1, 2, 3… — clues are solved strictly in this order |
+| `title` | string | |
+| `riddle` | string | |
+| `locationCoords` | GeoPoint, `{ lat, lng }`, or `[lat, lng]` | Where the pin appears |
+| `passcodeHash` | string | SHA-256 hex of the passcode, trimmed and lower-cased |
 
-1. Go to **"Build"** → **"Authentication"**
-2. Click **"Get started"**
-3. Click **"Email/Password"**
-4. Toggle **"Enable"** and click **"Save"**
+### `intel_feed/{id}`
 
-## Step 4: Get Firebase Config
+Posts on The Wire. The app reads the latest 60, newest by `timestamp`.
 
-1. Go to **"Project Settings"** (click gear icon)
-2. Click **"Your apps"** or scroll to bottom
-3. Click **"</>Web"** to add a web app
-4. Register app as: `campus-lost-found`
-5. Copy the config object that looks like:
+| Field | Type | Notes |
+| --- | --- | --- |
+| `teamName` | string | Copied from the poster's team |
+| `message` | string | Up to 140 characters |
+| `timestamp` | timestamp | Server time |
+| `mapCoordinates` | `{ lat, lng }` \| null | Optional pin — real or bluff |
 
-```javascript
-const firebaseConfig = {
-  apiKey: "AIzaSyD...",
-  authDomain: "campus-lost-found.firebaseapp.com",
-  projectId: "campus-lost-found",
-  storageBucket: "campus-lost-found.appspot.com",
-  messagingSenderId: "123456789",
-  appId: "1:123456789:web:abc123...",
-};
+## Adding clues
+
+Open the app, then in the browser DevTools console:
+
+```js
+await bakerStreet.hashPasscode("your answer"); // paste the result into passcodeHash
 ```
 
-## Step 5: Add Config to Your Website
+Create the clue documents in the Firebase Console with that hash. To try the app quickly, `await bakerStreet.seedSampleClues()` writes four demo clues around `MAP_CENTER` (passcodes: `221b`, `twelve`, `elementary`, `moriarty`); it needs write access to `clues`, so run it before locking the rules down.
 
-1. Open `app.js` in your editor
-2. Find this section:
-
-```javascript
-const firebaseConfig = {
-  apiKey: "YOUR_API_KEY",
-  authDomain: "YOUR_DOMAIN",
-  projectId: "YOUR_PROJECT_ID",
-  storageBucket: "YOUR_STORAGE_BUCKET",
-  messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
-  appId: "YOUR_APP_ID",
-};
-```
-
-3. Replace it with your actual config from Step 4
-
-## Step 6: Create Firestore Rules (Important for Security)
-
-### For Development (Test Mode - Anyone can read/write):
-
-Firestore → Rules → Replace with:
+## Security rules
 
 ```
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /items/{document=**} {
-      allow read, write: if true;
-    }
-  }
-}
-```
-
-### For Production (Recommended Later):
-
-```
-rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    match /items/{document=**} {
+    match /clues/{clueId} {
       allow read: if true;
-      allow create, update, delete: if request.auth != null;
+      allow write: if false; // edit clues from the Firebase Console
+    }
+    match /teams/{uid} {
+      allow read: if true;
+      allow create: if request.auth != null && request.auth.uid == uid
+        && request.resource.data.score == 0
+        && request.resource.data.cluesSolved == 0;
+      allow update: if request.auth != null && request.auth.uid == uid
+        && request.resource.data.teamName == resource.data.teamName
+        && request.resource.data.cluesSolved == resource.data.cluesSolved + 1
+        && request.resource.data.score == resource.data.score + 100;
+      allow delete: if false;
+    }
+    match /intel_feed/{postId} {
+      allow read: if true;
+      // Signed-in agencies only, posting under their own team name
+      allow create: if request.auth != null
+        && request.resource.data.keys().hasOnly(['teamName', 'message', 'timestamp', 'mapCoordinates'])
+        && request.resource.data.teamName ==
+           get(/databases/$(database)/documents/teams/$(request.auth.uid)).data.teamName
+        && request.resource.data.message is string
+        && request.resource.data.message.size() > 0
+        && request.resource.data.message.size() <= 140
+        && request.resource.data.timestamp == request.time;
+      allow update, delete: if false;
     }
   }
 }
 ```
 
-Click **"Publish"** after updating rules.
+## Limits of a client-only hunt
 
-## Step 7: Test Your Setup
+Passcodes are checked in the browser. These rules stop a team from jumping more than one clue per write or inflating its score, but a determined player can still read sealed riddles from the network tab or advance without the right passcode. For a competitive event, move the passcode check into a Cloud Function and deny client updates to `teams`.
 
-1. Open your website in browser
-2. Try signing up with an email
-3. Try posting an item
-4. Check Firebase Console → Firestore → "items" collection
-5. You should see your posted item!
+The Wire's 15-second posting cooldown is also client-side only; rules cannot rate-limit. Moderate by deleting documents from `intel_feed` in the Firebase Console.
 
-## Troubleshooting
-
-### Issue: "CORS error" or connection fails
-
-- Make sure you added the correct Firebase config
-- Check that your website URL is in Firebase Auth settings (optional for GitHub Pages)
-
-### Issue: Can't save data
-
-- Check Firestore Rules are published
-- Make sure Authentication is enabled
-- Verify projectId matches in config
-
-### Issue: Too many failed login attempts
-
-- This is normal Firebase protection
-- Wait 15 minutes before trying again
-
-## Free Tier Limits
-
-- **Firestore**: 1 GB storage, 50K reads/day (FREE FOREVER)
-- **Authentication**: No read limits (FREE FOREVER)
-- **This site easily fits within free limits!**
-
-## Need Help?
-
-- Firebase Docs: https://firebase.google.com/docs
-- Firestore Issues: https://firebase.google.com/support
-- Common Issues: Check browser console (F12) for error messages
-
-## Security Tips
-
-🔒 **Never commit your Firebase config to GitHub with real keys**
-
-- Use environment variables for production
-- Your apiKey is somewhat exposed on client side (normal for Firebase)
-- Real security comes from Firestore Rules
-
-That's it! Your website is now connected to Firebase. 🎉
+The old `items`, `claims`, and `verification_codes` collections are no longer used and can be deleted from the Firebase Console.

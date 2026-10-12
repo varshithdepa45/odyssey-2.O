@@ -1,5 +1,5 @@
 /* ================================================================
-   TraceNet AI — Geo-Intelligent Recovery Network
+   The Baker Street Hunt — Campus Treasure Hunt
    ----------------------------------------------------------------
    Single-file React app loaded as an ES module via Babel-standalone.
    ================================================================ */
@@ -22,17 +22,15 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebas
 import {
   getFirestore,
   collection,
-  addDoc,
-  deleteDoc,
   doc,
-  updateDoc,
+  setDoc,
+  addDoc,
   serverTimestamp,
   onSnapshot,
+  runTransaction,
   query,
-  where,
   orderBy,
-  getDoc,
-  setDoc,
+  limit,
 } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 import {
   getAuth,
@@ -58,170 +56,162 @@ const fbApp = initializeApp(firebaseConfig);
 const db = getFirestore(fbApp);
 const auth = getAuth(fbApp);
 
-/* ================== EMAILJS INIT ================== */
-// Initialize EmailJS - replace these with YOUR values from emailjs.com
-const EMAILJS_SERVICE_ID = "service_06cx0oi"; // Your EmailJS Service ID
-const EMAILJS_TEMPLATE_ID = "template_k0t8wbh"; // Your EmailJS Template ID
-const EMAILJS_PUBLIC_KEY = "wvB-U8QnWMRF7T1Ta"; // Your EmailJS Public Key
+/* ================== HUNT DATA (Firestore) ================== */
 
-// Initialize EmailJS (if keys are set up)
-if (EMAILJS_PUBLIC_KEY !== "YOUR_PUBLIC_KEY_HERE") {
-  try {
-    emailjs.init(EMAILJS_PUBLIC_KEY);
-    console.log("✅ EmailJS initialized");
-  } catch (e) {
-    console.warn("EmailJS init error (will fallback to console):", e.message);
-  }
-}
-
-/* ================== 2-FACTOR AUTHENTICATION (FREE DEMO) ================== */
-
-// ⚠️ DEMO MODE: Uses console logging
-// 📧 TO SEND REAL EMAILS: See CLERK_SETUP.md for SendGrid integration
-
-// Generate a 6-digit verification code
-function generateVerificationCode() {
-  return Math.floor(100000 + Math.random() * 900000).toString();
-}
-
-// Send verification code via email
-async function sendVerificationCode(email) {
-  try {
-    const code = generateVerificationCode();
-    const expiryTime = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes expiry
-
-    await setDoc(doc(db, "verification_codes", email), {
-      code,
-      expiryTime,
-      createdAt: serverTimestamp(),
-      verified: false,
-    });
-
-    // Try to send real email via SendGrid
-    try {
-      await sendEmailViaCloudFunction(email, code);
-      console.log(`✅ Verification email sent to ${email}`);
-    } catch (emailError) {
-      // Fallback: Show code in console if email fails
-      console.warn("📧 Email service unavailable, showing code in console");
-      console.clear();
-      console.log(
-        "%c🔐 TRACENET AI - EMAIL VERIFICATION CODE",
-        "color: #22d3ee; font-size: 16px; font-weight: bold; background: #05060f; padding: 8px;",
-      );
-      console.log(
-        "%cEmail: " + email,
-        "color: #a855f7; font-size: 14px; background: #0b0d1c; padding: 4px;",
-      );
-      console.log(
-        "%cCode: " + code,
-        "color: #fbbf24; font-size: 20px; font-weight: bold; background: #0b0d1c; padding: 8px; font-family: monospace;",
-      );
-      console.log(
-        "%cExpires in: 10 minutes",
-        "color: #34d399; font-size: 12px; background: #0b0d1c; padding: 4px;",
-      );
-    }
-
-    return code;
-  } catch (error) {
-    console.error("❌ Error sending verification code:", error);
-    throw new Error("Failed to send verification code. Please try again.");
-  }
-}
-
-// Send email via Firebase Cloud Function + SendGrid
-async function sendEmailViaCloudFunction(email, code) {
-  try {
-    // Send via EmailJS (no backend needed!)
-    const response = await emailjs.send(
-      EMAILJS_SERVICE_ID,
-      EMAILJS_TEMPLATE_ID,
-      {
-        to_email: email,
-        verification_code: code,
-        user_email: email,
-        code_number: code,
-      },
-    );
-
-    if (response.status === 200) {
-      return { success: true };
-    }
-    throw new Error("Failed to send email");
-  } catch (error) {
-    console.error("EmailJS error:", error);
-    throw error;
-  }
-}
-
-// Verify the code entered by user
-async function verifyCode(email, enteredCode) {
-  try {
-    const docRef = doc(db, "verification_codes", email);
-    const docSnap = await getDoc(docRef);
-
-    if (!docSnap.exists()) {
-      throw new Error("Verification code expired. Please sign in again.");
-    }
-
-    const { code, expiryTime, verified } = docSnap.data();
-
-    if (verified) {
-      throw new Error("Code already verified. Please sign in again.");
-    }
-
-    const now = new Date();
-    const expiry = expiryTime?.toDate?.() || new Date(expiryTime);
-
-    if (now > expiry) {
-      await deleteDoc(docRef);
-      throw new Error("Verification code expired. Please sign in again.");
-    }
-
-    if (code !== enteredCode) {
-      throw new Error("Invalid verification code. Please try again.");
-    }
-
-    // Mark as verified
-    await setDoc(docRef, { verified: true }, { merge: true });
-
-    return true;
-  } catch (error) {
-    console.error("❌ Code verification error:", error);
-    throw error;
-  }
-}
-
-// Clean up verification code after successful login
-async function clearVerificationCode(email) {
-  try {
-    await deleteDoc(doc(db, "verification_codes", email));
-  } catch (error) {
-    console.warn("Warning: Could not clear verification code:", error);
-  }
-}
-
-// Optional: Send real email via SendGrid or other service
-// Uncomment and configure in CLERK_SETUP.md
-// async function sendEmailWithVerificationCode(email, code) {
-//   // Example using Firebase Cloud Functions
-//   // const response = await fetch('YOUR_CLOUD_FUNCTION_URL', {
-//   //   method: 'POST',
-//   //   headers: { 'Content-Type': 'application/json' },
-//   //   body: JSON.stringify({ email, code })
-//   // });
-//   // return response.json();
-// }
-
-/* ================== CLAIMS + CHAT (Firestore) ================== */
-
-// claims/{id}                      — top-level claim doc
-// claims/{id}/messages/{id}        — messages subcollection
+// teams/{uid}   — teamName, score, cluesSolved, lastSolvedAt
+// clues/{id}    — id, order, title, riddle, locationCoords, passcodeHash
 //
-// A claim represents an "I think this item is mine" request from a
-// claimant against an item-poster (the finder). Messaging only opens
-// after the owner approves the claim.
+// One team per signed-in account (doc id = auth uid). Clues are solved
+// strictly in `order`, so `cluesSolved` doubles as the unlock cursor:
+// the clue at index `cluesSolved` is the open case, everything before
+// it is solved, everything after it stays sealed.
+
+const POINTS_PER_CLUE = 100;
+
+// Default map anchor (NYC midtown) — used until clue pins arrive.
+// Point this at your campus.
+const MAP_CENTER = [40.7589, -73.9851];
+
+function normalizePasscode(s) {
+  return String(s ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+// SHA-256 hex of the normalized passcode. `clues.passcodeHash` must be
+// produced with this same function (see window.bakerStreet below).
+async function hashPasscode(input) {
+  const bytes = new TextEncoder().encode(normalizePasscode(input));
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+// Accepts a Firestore GeoPoint, { lat, lng|lon }, or [lat, lng].
+function toLatLng(c) {
+  if (!c) return null;
+  const lat = parseFloat(Array.isArray(c) ? c[0] : (c.latitude ?? c.lat));
+  const lng = parseFloat(
+    Array.isArray(c) ? c[1] : (c.longitude ?? c.lng ?? c.lon),
+  );
+  if (
+    !Number.isFinite(lat) ||
+    !Number.isFinite(lng) ||
+    Math.abs(lat) > 90 ||
+    Math.abs(lng) > 180
+  )
+    return null;
+  return [lat, lng];
+}
+
+const clueCoords = (clue) => toLatLng(clue?.locationCoords);
+
+async function registerTeam(user, teamName) {
+  const name = (teamName || "").trim().slice(0, 40);
+  if (!user) throw new Error("Sign in to register your agency.");
+  if (name.length < 2) throw new Error("Give your agency a name.");
+  await setDoc(doc(db, "teams", user.uid), {
+    teamName: name,
+    score: 0,
+    cluesSolved: 0,
+    lastSolvedAt: null,
+  });
+}
+
+// Returns true when the passcode matches. The team doc is advanced in
+// a transaction so a double submit (or a second device) can't score
+// the same clue twice.
+async function submitPasscode({ user, clue, index, attempt }) {
+  if (!user) throw new Error("Sign in to submit a deduction.");
+  const hash = await hashPasscode(attempt);
+  if (hash !== String(clue.passcodeHash || "").toLowerCase()) return false;
+
+  const ref = doc(db, "teams", user.uid);
+  await runTransaction(db, async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists()) throw new Error("Register your agency first.");
+    const team = snap.data();
+    if ((team.cluesSolved || 0) !== index) return; // already advanced
+    tx.update(ref, {
+      score: (team.score || 0) + POINTS_PER_CLUE,
+      cluesSolved: index + 1,
+      lastSolvedAt: serverTimestamp(),
+    });
+  });
+  return true;
+}
+
+// Higher score first; ties go to whoever solved their last clue earlier.
+function rankTeams(teams) {
+  return [...teams].sort((a, b) => {
+    if ((b.score || 0) !== (a.score || 0)) return (b.score || 0) - (a.score || 0);
+    const ta = tsToMillis(a.lastSolvedAt) || Infinity;
+    const tb = tsToMillis(b.lastSolvedAt) || Infinity;
+    if (ta !== tb) return ta - tb;
+    return (a.teamName || "").localeCompare(b.teamName || "");
+  });
+}
+
+// ----- Organizer helpers (DevTools console) -----------------------
+// bakerStreet.hashPasscode("answer")  → value for clues.passcodeHash
+// bakerStreet.seedSampleClues()       → writes four demo clues around
+//                                       MAP_CENTER (needs write access
+//                                       to `clues` in your rules)
+const SAMPLE_CLUES = [
+  {
+    title: "A Study in Scarlet",
+    riddle:
+      "I hold a thousand voices yet never speak. Find the desk where silence is the rule, and read the number on its brass plate.",
+    passcode: "221b",
+    offset: [0.0012, -0.001],
+  },
+  {
+    title: "The Sign of the Four",
+    riddle:
+      "Four faces, eight hands, and not one of them can hold a pipe. Stand beneath me at noon and count my chimes.",
+    passcode: "twelve",
+    offset: [-0.0009, 0.0014],
+  },
+  {
+    title: "The Speckled Band",
+    riddle:
+      "Where steam rises and the morning crowd gathers, a spotted ribbon hangs by the door. What word is stitched upon it?",
+    passcode: "elementary",
+    offset: [0.0018, 0.0016],
+  },
+  {
+    title: "The Final Problem",
+    riddle:
+      "Water falls where no river runs. At the drop point by the fountain, the Professor left his name behind.",
+    passcode: "moriarty",
+    offset: [-0.0016, -0.0013],
+  },
+];
+
+async function seedSampleClues() {
+  for (let i = 0; i < SAMPLE_CLUES.length; i++) {
+    const c = SAMPLE_CLUES[i];
+    const id = `clue-${i + 1}`;
+    await setDoc(doc(db, "clues", id), {
+      id,
+      order: i + 1,
+      title: c.title,
+      riddle: c.riddle,
+      locationCoords: {
+        lat: MAP_CENTER[0] + c.offset[0],
+        lng: MAP_CENTER[1] + c.offset[1],
+      },
+      passcodeHash: await hashPasscode(c.passcode),
+    });
+  }
+  console.info(`[BakerStreet] seeded ${SAMPLE_CLUES.length} sample clues`);
+}
+
+window.bakerStreet = { hashPasscode, seedSampleClues };
+
+/* ================== UTILS ================== */
 
 function tsToMillis(ts) {
   if (!ts) return 0;
@@ -230,229 +220,6 @@ function tsToMillis(ts) {
   const d = new Date(ts);
   return isNaN(d.getTime()) ? 0 : d.getTime();
 }
-
-function formatTime(ts) {
-  const ms = tsToMillis(ts);
-  if (!ms) return "";
-  const d = new Date(ms);
-  const today = new Date();
-  const sameDay =
-    d.getDate() === today.getDate() &&
-    d.getMonth() === today.getMonth() &&
-    d.getFullYear() === today.getFullYear();
-  if (sameDay) {
-    return d.toLocaleTimeString("en-US", {
-      hour: "numeric",
-      minute: "2-digit",
-    });
-  }
-  return d.toLocaleString("en-US", {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
-}
-
-function displayNameOf(user) {
-  return (
-    user?.displayName ||
-    (user?.email ? user.email.split("@")[0] : null) ||
-    "User"
-  );
-}
-
-async function createClaim({ item, currentUser, note }) {
-  if (!currentUser) throw new Error("Sign in to claim an item.");
-  if (!item) throw new Error("No item provided.");
-  if (item.userId && item.userId === currentUser.uid)
-    throw new Error("You can't claim your own post.");
-
-  const payload = {
-    itemId: item.id,
-    itemTitle: item.itemOriginal || item.item || "Untitled item",
-    itemType: item.type || "found",
-    ownerUid: item.userId || "anonymous",
-    ownerName: item.name || "Owner",
-    ownerEmail: item.email || "",
-    claimantUid: currentUser.uid,
-    claimantName: displayNameOf(currentUser),
-    claimantEmail: currentUser.email || "",
-    participants: [item.userId || "anonymous", currentUser.uid],
-    status: "pending",
-    note: (note || "").slice(0, 280),
-    createdAt: serverTimestamp(),
-    lastMessageAt: null,
-    lastMessageText: "",
-    lastMessageBy: "",
-  };
-  const ref = await addDoc(collection(db, "claims"), payload);
-  return ref.id;
-}
-
-async function setClaimStatus(claim, status) {
-  // Backwards-compatible: accept either a claim object or a raw id.
-  const claimId = typeof claim === "string" ? claim : claim?.id;
-  if (!claimId) throw new Error("setClaimStatus: missing claim id");
-  await updateDoc(doc(db, "claims", claimId), {
-    status,
-    decidedAt: serverTimestamp(),
-  });
-
-  // When a claim is approved, denormalize onto the item so the
-  // "recovered" marker is visible to every visitor (not gated behind
-  // a single user's claim subscription).
-  const itemId = typeof claim === "string" ? null : claim?.itemId;
-  if (status === "approved" && itemId) {
-    try {
-      await updateDoc(doc(db, "items", itemId), {
-        matched: true,
-        recoveredAt: serverTimestamp(),
-      });
-    } catch (e) {
-      // The owner field write may be denied by rules in some
-      // configurations — log but don't break the approval flow.
-      console.warn(
-        "[TraceNet] approve succeeded but item recovery flag failed:",
-        e?.message || e,
-      );
-    }
-  }
-}
-
-async function sendChatMessage({ claimId, currentUser, text }) {
-  const trimmed = (text || "").trim();
-  if (!trimmed || !currentUser || !claimId) return;
-  const senderName = displayNameOf(currentUser);
-  await addDoc(collection(db, "claims", claimId, "messages"), {
-    text: trimmed.slice(0, 2000),
-    senderUid: currentUser.uid,
-    senderName,
-    createdAt: serverTimestamp(),
-  });
-  // Mirror the latest message onto the parent claim so inbox previews
-  // and unread detection don't need to fan-out reads on every render.
-  await updateDoc(doc(db, "claims", claimId), {
-    lastMessageAt: serverTimestamp(),
-    lastMessageText: trimmed.slice(0, 140),
-    lastMessageBy: currentUser.uid,
-  });
-}
-
-// ----- Unread tracking (per-browser, no extra writes) -------------
-const SEEN_KEY = "tn-claim-seen";
-function readSeen() {
-  try {
-    return JSON.parse(localStorage.getItem(SEEN_KEY) || "{}") || {};
-  } catch {
-    return {};
-  }
-}
-function markSeen(claimId) {
-  if (!claimId) return;
-  const seen = readSeen();
-  seen[claimId] = Date.now();
-  try {
-    localStorage.setItem(SEEN_KEY, JSON.stringify(seen));
-  } catch {}
-}
-function claimIsUnread(claim, currentUid, seenMap) {
-  if (!claim || !currentUid) return false;
-  if (!claim.lastMessageAt) return false;
-  if (claim.lastMessageBy === currentUid) return false;
-  const seenAt = seenMap[claim.id] || 0;
-  return tsToMillis(claim.lastMessageAt) > seenAt;
-}
-
-// ----- Hooks ------------------------------------------------------
-function useClaims(user) {
-  const [claims, setClaims] = useState([]);
-  useEffect(() => {
-    if (!user) {
-      setClaims([]);
-      return;
-    }
-    const q = query(
-      collection(db, "claims"),
-      where("participants", "array-contains", user.uid),
-    );
-    const unsub = onSnapshot(
-      q,
-      (snap) => {
-        const list = [];
-        snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
-        list.sort(
-          (a, b) =>
-            tsToMillis(b.lastMessageAt || b.createdAt) -
-            tsToMillis(a.lastMessageAt || a.createdAt),
-        );
-        setClaims(list);
-      },
-      (err) => console.error("claims snapshot:", err),
-    );
-    return () => unsub();
-  }, [user]);
-  return claims;
-}
-
-function useChatMessages(claimId) {
-  const [msgs, setMsgs] = useState([]);
-  useEffect(() => {
-    if (!claimId) {
-      setMsgs([]);
-      return;
-    }
-    const q = query(
-      collection(db, "claims", claimId, "messages"),
-      orderBy("createdAt", "asc"),
-    );
-    const unsub = onSnapshot(
-      q,
-      (snap) => {
-        const list = [];
-        snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
-        setMsgs(list);
-      },
-      (err) => console.error("messages snapshot:", err),
-    );
-    return () => unsub();
-  }, [claimId]);
-  return msgs;
-}
-
-/* ================== CONSTANTS ================== */
-
-const CATEGORIES = [
-  "Electronics",
-  "Documents",
-  "Accessories",
-  "Clothing",
-  "Other",
-];
-
-const CAT_COLORS = {
-  Electronics: "#22d3ee",
-  Documents: "#a855f7",
-  Accessories: "#ec4899",
-  Clothing: "#fbbf24",
-  Other: "#34d399",
-};
-
-const CAT_GLYPH = {
-  Electronics: "📱",
-  Documents: "📄",
-  Accessories: "🎒",
-  Clothing: "👕",
-  Other: "📦",
-};
-
-// Default map anchor (NYC midtown). Items don't carry real coords;
-// each location string is hashed to a stable pseudo-position around
-// this anchor so the map looks dense and useful.
-const MAP_CENTER = [40.7589, -73.9851];
-const MAP_RADIUS_DEG = 0.05;
-
-/* ================== UTILS ================== */
 
 const cn = (...a) => a.filter(Boolean).join(" ");
 
@@ -468,43 +235,6 @@ function escapeHtml(s) {
         "'": "&#39;",
       })[c],
   );
-}
-
-function hashString(s) {
-  let h = 2166136261;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return h >>> 0;
-}
-
-function locationToCoords(location) {
-  const key = (location || "unknown").toLowerCase();
-  const h1 = hashString(key);
-  const h2 = hashString(key + "::salt");
-  const lat = MAP_CENTER[0] + ((h1 % 10000) / 10000 - 0.5) * 2 * MAP_RADIUS_DEG;
-  const lng = MAP_CENTER[1] + ((h2 % 10000) / 10000 - 0.5) * 2 * MAP_RADIUS_DEG;
-  return [lat, lng];
-}
-
-// Prefer real lat/lon (from geocoded autocomplete) and gracefully
-// fall back to deterministic hashed coords for legacy items.
-// `parseFloat` accepts both numbers and numeric strings, so this is
-// robust regardless of how Firestore round-trips the field.
-function itemCoords(item) {
-  const lat = parseFloat(item?.lat);
-  const lon = parseFloat(item?.lon);
-  if (
-    Number.isFinite(lat) &&
-    Number.isFinite(lon) &&
-    !(lat === 0 && lon === 0) &&
-    Math.abs(lat) <= 90 &&
-    Math.abs(lon) <= 180
-  ) {
-    return [lat, lon];
-  }
-  return locationToCoords(item?.locationOriginal || item?.location || "");
 }
 
 function formatDate(d) {
@@ -540,518 +270,7 @@ function formatDistance(meters) {
   return `${Math.round(meters / 1000)} km`;
 }
 
-// Heuristic 0–100 score derived from existing fields. No new
-// Firestore fields are introduced — pure derivation.
-function computeTrustScore(item, allItems) {
-  if (!item) return 0;
-  let s = 28; // baseline
-  if (item.email) s += 16;
-  if (item.phone) s += 16;
-  if (item.userId && item.userId !== "anonymous") s += 14;
-  if (item.photoData) s += 10;
-  if ((item.description || "").trim().length >= 20) s += 8;
-  if (Number.isFinite(Number(item.lat)) && Number.isFinite(Number(item.lon)))
-    s += 6;
-  if (item.userId && Array.isArray(allItems)) {
-    const posts = allItems.filter((i) => i.userId === item.userId).length;
-    s += Math.min(posts * 2, 10);
-  }
-  return Math.max(0, Math.min(100, Math.round(s)));
-}
-
-function trustLabel(score) {
-  if (score >= 85) return "Verified";
-  if (score >= 70) return "Trusted";
-  if (score >= 50) return "Moderate";
-  if (score >= 30) return "Limited";
-  return "Unvetted";
-}
-
-// "Recently recovered" = item.matched flipped within the last 14 days.
-// Lifted to module scope so the dashboard, map, and analytics can
-// share a single source of truth.
-const RECOVERY_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
-function isRecoveredItem(item) {
-  if (!item?.matched) return false;
-  const ms = tsToMillis(item.recoveredAt);
-  if (!ms) return true; // matched but no timestamp — still treat as recovered
-  return Date.now() - ms <= RECOVERY_WINDOW_MS;
-}
-
-function tokenize(s) {
-  return (s || "").toLowerCase().match(/\w+/g) || [];
-}
-
-function jaccard(a, b) {
-  const A = new Set(tokenize(a));
-  const B = new Set(tokenize(b));
-  if (!A.size && !B.size) return 0;
-  let inter = 0;
-  for (const x of A) if (B.has(x)) inter++;
-  return inter / (A.size + B.size - inter || 1);
-}
-
-function matchScore(lost, found) {
-  if (!lost || !found || lost.type === found.type) return 0;
-  const nameSim = jaccard(
-    lost.itemOriginal || lost.item,
-    found.itemOriginal || found.item,
-  );
-  const descSim = jaccard(lost.description, found.description);
-  const locSim = jaccard(
-    lost.locationOriginal || lost.location,
-    found.locationOriginal || found.location,
-  );
-  const catBoost = lost.category && lost.category === found.category ? 0.15 : 0;
-  return Math.min(1, nameSim * 0.55 + descSim * 0.2 + locSim * 0.15 + catBoost);
-}
-
-/* ---------- Image fingerprinting (no external deps, pure canvas) ----------
-
-   Two complementary signals computed once per photo:
-     1. dHash (8x8 difference hash, 64 bits as a 0/1 string)
-        Captures structure / edges. Robust to lighting + small crops.
-     2. Colour histogram (4x4x4 RGB bins, 64-d normalized vector)
-        Captures palette. Catches recolour / filter variants.
-
-   Image similarity = 0.65 * (1 - hammingDistance / 64) + 0.35 * cosine(hist).
-
-   This is the standard "perceptual hash" approach used in Imagga,
-   Tineye-lite tools, etc. Good enough for hackathon-grade duplicate
-   and near-duplicate detection without shipping an ML model.
-*/
-
-const _imgFpCache = new Map(); // itemId -> { dhash, hist, photoLen }
-
-function _loadImage(src) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error("image load failed"));
-    img.src = src;
-  });
-}
-
-async function computeImageFingerprint(dataUrl) {
-  if (!dataUrl || typeof dataUrl !== "string") return null;
-  let img;
-  try {
-    img = await _loadImage(dataUrl);
-  } catch {
-    return null;
-  }
-
-  const c = document.createElement("canvas");
-  const ctx = c.getContext("2d", { willReadFrequently: true });
-
-  // -- dHash (9x8 grayscale, compare adjacent horizontal pixels) ----
-  c.width = 9;
-  c.height = 8;
-  ctx.drawImage(img, 0, 0, 9, 8);
-  let pix;
-  try {
-    pix = ctx.getImageData(0, 0, 9, 8).data;
-  } catch {
-    return null; // tainted canvas — shouldn't happen for data: URLs
-  }
-  const gray = new Float32Array(72);
-  for (let i = 0, j = 0; i < pix.length; i += 4, j++) {
-    gray[j] = 0.299 * pix[i] + 0.587 * pix[i + 1] + 0.114 * pix[i + 2];
-  }
-  let dhash = "";
-  for (let row = 0; row < 8; row++) {
-    for (let col = 0; col < 8; col++) {
-      const a = gray[row * 9 + col];
-      const b = gray[row * 9 + col + 1];
-      dhash += a < b ? "1" : "0";
-    }
-  }
-
-  // -- Colour histogram (32x32, 4 bins per channel = 64-dim) -------
-  c.width = 32;
-  c.height = 32;
-  ctx.drawImage(img, 0, 0, 32, 32);
-  const pix2 = ctx.getImageData(0, 0, 32, 32).data;
-  const hist = new Float32Array(64);
-  let total = 0;
-  for (let i = 0; i < pix2.length; i += 4) {
-    const r = pix2[i] >> 6; // 0..3
-    const g = pix2[i + 1] >> 6;
-    const b = pix2[i + 2] >> 6;
-    hist[(r << 4) | (g << 2) | b]++;
-    total++;
-  }
-  if (total > 0) for (let i = 0; i < 64; i++) hist[i] /= total;
-
-  return { dhash, hist };
-}
-
-function hammingDistance64(a, b) {
-  if (!a || !b || a.length !== 64 || b.length !== 64) return 64;
-  let d = 0;
-  for (let i = 0; i < 64; i++) if (a.charCodeAt(i) !== b.charCodeAt(i)) d++;
-  return d;
-}
-
-function cosineSimilarity(a, b) {
-  let dot = 0,
-    na = 0,
-    nb = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    na += a[i] * a[i];
-    nb += b[i] * b[i];
-  }
-  return na && nb ? dot / Math.sqrt(na * nb) : 0;
-}
-
-// Returns 0..1 similarity, or null if either fingerprint is missing.
-function imageSimilarity(fpA, fpB) {
-  if (!fpA || !fpB) return null;
-  const hashSim = 1 - hammingDistance64(fpA.dhash, fpB.dhash) / 64;
-  const histSim = cosineSimilarity(fpA.hist, fpB.hist);
-  return Math.max(0, Math.min(1, hashSim * 0.65 + histSim * 0.35));
-}
-
-/* ---------- Advanced matching ---------- */
-
-// Real-world distance in metres between two items if both have plottable
-// coords. Uses a haversine approximation — good enough at city scale.
-function itemDistanceMeters(a, b) {
-  const ca = itemCoords(a);
-  const cb = itemCoords(b);
-  if (!ca || !cb || !Number.isFinite(ca[0]) || !Number.isFinite(cb[0]))
-    return null;
-  const aHasReal =
-    Number.isFinite(parseFloat(a?.lat)) && Number.isFinite(parseFloat(a?.lon));
-  const bHasReal =
-    Number.isFinite(parseFloat(b?.lat)) && Number.isFinite(parseFloat(b?.lon));
-  if (!aHasReal || !bHasReal) return null; // ignore hashed pseudo-coords
-  const toRad = (x) => (x * Math.PI) / 180;
-  const R = 6371000;
-  const dLat = toRad(cb[0] - ca[0]);
-  const dLon = toRad(cb[1] - ca[1]);
-  const s1 = Math.sin(dLat / 2);
-  const s2 = Math.sin(dLon / 2);
-  const h = s1 * s1 + Math.cos(toRad(ca[0])) * Math.cos(toRad(cb[0])) * s2 * s2;
-  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
-}
-
-function locationProximityBoost(distMeters) {
-  if (distMeters == null) return null;
-  if (distMeters < 500) return 0.2;
-  if (distMeters < 2000) return 0.13;
-  if (distMeters < 10000) return 0.06;
-  if (distMeters < 50000) return 0.02;
-  return 0;
-}
-
-function advancedMatchScore({ lost, found, imgSim, distance }) {
-  if (!lost || !found || lost.type === found.type) return 0;
-  const titleSim = jaccard(
-    lost.itemOriginal || lost.item,
-    found.itemOriginal || found.item,
-  );
-  const descSim = jaccard(lost.description, found.description);
-  const catBoost = lost.category && lost.category === found.category ? 0.12 : 0;
-  const locBoost =
-    locationProximityBoost(distance) ??
-    jaccard(
-      lost.locationOriginal || lost.location,
-      found.locationOriginal || found.location,
-    ) * 0.1;
-  const imgBoost = imgSim != null ? imgSim * 0.22 : 0;
-  // Weights chosen so each factor *can* push score across thresholds:
-  //   title 38, desc 18, category 12, location 20, image 22  →  100+
-  return Math.max(
-    0,
-    Math.min(
-      1,
-      titleSim * 0.38 + descSim * 0.18 + catBoost + locBoost + imgBoost,
-    ),
-  );
-}
-
-/* ---------- Per-item fraud risk ---------- */
-
-function itemFraudRisk(item, allItems, fingerprints) {
-  if (!item) return { score: 0, level: "low", reasons: [] };
-  let score = 0;
-  const reasons = [];
-
-  if (
-    (item.description || "").trim().length > 0 &&
-    (item.description || "").trim().length < 8
-  ) {
-    score += 12;
-    reasons.push("Very short description");
-  }
-  if (!item.photoData && (!item.userId || item.userId === "anonymous")) {
-    score += 22;
-    reasons.push("Anonymous post with no photo");
-  }
-  if (!item.email && !item.phone) {
-    score += 14;
-    reasons.push("No contact info");
-  }
-  const todayKey = new Date().toISOString().slice(0, 10);
-  if (item.date && item.date > todayKey) {
-    score += 28;
-    reasons.push("Future-dated");
-  }
-
-  // Duplicate description across distinct posters
-  const myDesc = (item.description || "").trim().toLowerCase();
-  if (myDesc.length >= 15) {
-    const dupes = allItems.filter(
-      (i) =>
-        i.id !== item.id &&
-        (i.description || "").trim().toLowerCase() === myDesc,
-    );
-    if (dupes.length > 0) {
-      score += Math.min(28, 14 + dupes.length * 6);
-      reasons.push(`Identical description in ${dupes.length} other post(s)`);
-    }
-  }
-
-  // Image fingerprint reused by a different poster
-  const myFp = fingerprints?.[item.id];
-  if (myFp && allItems.length > 1) {
-    let hits = 0;
-    for (const o of allItems) {
-      if (o.id === item.id) continue;
-      if (o.userId && item.userId && o.userId === item.userId) continue;
-      const oFp = fingerprints[o.id];
-      if (!oFp) continue;
-      const s = imageSimilarity(myFp, oFp);
-      if (s != null && s > 0.92) hits++;
-    }
-    if (hits > 0) {
-      score += Math.min(35, hits * 18);
-      reasons.push(
-        `Image near-duplicate of ${hits} other user${hits > 1 ? "s'" : "'s"} post`,
-      );
-    }
-  }
-
-  // Spam burst — same email, multiple posts within minutes
-  if (item.email && item.createdAt) {
-    const myT = item.createdAt?.seconds
-      ? item.createdAt.seconds * 1000
-      : new Date(item.createdAt).getTime();
-    const burst = allItems.filter((i) => {
-      if (i.id === item.id || i.email !== item.email || !i.createdAt)
-        return false;
-      const t = i.createdAt?.seconds
-        ? i.createdAt.seconds * 1000
-        : new Date(i.createdAt).getTime();
-      return Math.abs(t - myT) < 5 * 60 * 1000;
-    });
-    if (burst.length > 0) {
-      score += 12;
-      reasons.push(`Posted within 5 min of ${burst.length} other post(s)`);
-    }
-  }
-
-  score = Math.max(0, Math.min(100, score));
-  const level = score >= 60 ? "high" : score >= 30 ? "medium" : "low";
-  return { score, level, reasons };
-}
-
-function findAdvancedMatches(items, fingerprints, limit = 4) {
-  const lostList = items.filter((i) => i.type === "lost");
-  const foundList = items.filter((i) => i.type === "found");
-  const pairs = [];
-  for (const l of lostList) {
-    for (const f of foundList) {
-      const distance = itemDistanceMeters(l, f);
-      const imgSim = imageSimilarity(
-        fingerprints?.[l.id],
-        fingerprints?.[f.id],
-      );
-      const score = advancedMatchScore({ lost: l, found: f, imgSim, distance });
-      if (score > 0.25) {
-        const lostRisk = itemFraudRisk(l, items, fingerprints);
-        const foundRisk = itemFraudRisk(f, items, fingerprints);
-        const fraud = lostRisk.score >= foundRisk.score ? lostRisk : foundRisk;
-        pairs.push({
-          lost: l,
-          found: f,
-          score,
-          imgSim,
-          distance,
-          fraud,
-          trust: Math.round(
-            (computeTrustScore(l, items) + computeTrustScore(f, items)) / 2,
-          ),
-        });
-      }
-    }
-  }
-  pairs.sort((a, b) => b.score - a.score);
-  return pairs.slice(0, limit);
-}
-
-function findTopMatches(items, limit = 4) {
-  // Kept for backward compat — equivalent to findAdvancedMatches with
-  // no fingerprints (image similarity won't contribute).
-  return findAdvancedMatches(items, {}, limit);
-}
-
-function detectFraud(items) {
-  const alerts = [];
-  const todayKey = new Date().toISOString().slice(0, 10);
-
-  // Rapid-fire posts from same email
-  const byEmail = new Map();
-  for (const it of items) {
-    if (!it.email || !it.createdAt) continue;
-    const t = it.createdAt?.seconds
-      ? it.createdAt.seconds * 1000
-      : new Date(it.createdAt).getTime();
-    if (!byEmail.has(it.email)) byEmail.set(it.email, []);
-    byEmail.get(it.email).push({ item: it, t });
-  }
-  for (const [email, posts] of byEmail) {
-    if (posts.length < 2) continue;
-    posts.sort((a, b) => a.t - b.t);
-    for (let i = 1; i < posts.length; i++) {
-      if (posts[i].t - posts[i - 1].t < 5 * 60 * 1000) {
-        alerts.push({
-          severity: "medium",
-          type: "Spam Pattern",
-          item: posts[i].item,
-          reason: `${posts.length} posts from ${email} within minutes of each other.`,
-        });
-        break;
-      }
-    }
-  }
-
-  // Identical descriptions across distinct posts
-  const descMap = new Map();
-  for (const it of items) {
-    const d = (it.description || "").trim().toLowerCase();
-    if (d.length < 15) continue;
-    if (!descMap.has(d)) descMap.set(d, []);
-    descMap.get(d).push(it);
-  }
-  for (const [, group] of descMap) {
-    if (group.length >= 2) {
-      alerts.push({
-        severity: "high",
-        type: "Duplicate Content",
-        item: group[group.length - 1],
-        reason: `${group.length} posts share an identical description body.`,
-      });
-    }
-  }
-
-  // Future-dated items
-  for (const it of items) {
-    if (it.date && it.date > todayKey) {
-      alerts.push({
-        severity: "low",
-        type: "Anomalous Date",
-        item: it,
-        reason: `Reported with a future date (${it.date}).`,
-      });
-    }
-  }
-
-  // Suspiciously thin descriptions
-  for (const it of items) {
-    if (
-      (it.description || "").trim().length > 0 &&
-      (it.description || "").trim().length < 8
-    ) {
-      alerts.push({
-        severity: "low",
-        type: "Low-Quality Post",
-        item: it,
-        reason: "Description is too short to be useful for matching.",
-      });
-    }
-  }
-
-  // Dedupe by item id + alert type
-  const seen = new Set();
-  const out = [];
-  for (const a of alerts) {
-    const k = (a.item?.id || "?") + "|" + a.type;
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.push(a);
-  }
-  return out.slice(0, 6);
-}
-
 /* ================== HOOKS ================== */
-
-// Compute fingerprints once per item (cached by id + photo length).
-// Runs in parallel; surfaces a result map and a `computing` flag so
-// the UI can show a "scanning images" affordance while AI runs.
-function useImageFingerprints(items) {
-  const [fingerprints, setFingerprints] = useState({});
-  const [computing, setComputing] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    const work = items.filter(
-      (i) =>
-        i.photoData &&
-        (!_imgFpCache.has(i.id) ||
-          _imgFpCache.get(i.id)?.photoLen !== i.photoData.length),
-    );
-    if (work.length === 0) {
-      // Nothing to compute — surface what's already cached.
-      const next = {};
-      for (const i of items) {
-        const fp = _imgFpCache.get(i.id);
-        if (fp) next[i.id] = fp;
-      }
-      setFingerprints((prev) => {
-        // Avoid useless updates if nothing actually changed.
-        const sameSize = Object.keys(prev).length === Object.keys(next).length;
-        if (sameSize && Object.keys(next).every((k) => prev[k] === next[k]))
-          return prev;
-        return next;
-      });
-      return;
-    }
-
-    setComputing(true);
-    Promise.all(
-      work.map(async (i) => {
-        try {
-          const fp = await computeImageFingerprint(i.photoData);
-          if (fp) {
-            fp.photoLen = i.photoData.length;
-            _imgFpCache.set(i.id, fp);
-          }
-          return [i.id, fp];
-        } catch {
-          return [i.id, null];
-        }
-      }),
-    ).then(() => {
-      if (cancelled) return;
-      const next = {};
-      for (const i of items) {
-        const fp = _imgFpCache.get(i.id);
-        if (fp) next[i.id] = fp;
-      }
-      setFingerprints(next);
-      setComputing(false);
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [items]);
-
-  return { fingerprints, computing };
-}
 
 function useAnimatedNumber(target, duration = 1.1) {
   const [value, setValue] = useState(0);
@@ -1064,6 +283,50 @@ function useAnimatedNumber(target, duration = 1.1) {
     return () => controls.stop();
   }, [target, duration]);
   return value;
+}
+
+function useClues() {
+  const [clues, setClues] = useState([]);
+  useEffect(() => {
+    const unsub = onSnapshot(
+      collection(db, "clues"),
+      (snap) => {
+        const list = [];
+        snap.forEach((d) => list.push({ ...d.data(), id: d.id }));
+        list.sort((a, b) => (Number(a.order) || 0) - (Number(b.order) || 0));
+        setClues(list);
+      },
+      (err) => console.error("clues snapshot:", err),
+    );
+    return () => unsub();
+  }, []);
+  return clues;
+}
+
+function useTeams() {
+  const [teams, setTeams] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    const unsub = onSnapshot(
+      collection(db, "teams"),
+      (snap) => {
+        const list = [];
+        snap.forEach((d) =>
+          list.push({
+            id: d.id,
+            // "estimate" keeps a just-written lastSolvedAt from reading
+            // as null (and briefly mis-ranking) before the server acks.
+            ...d.data({ serverTimestamps: "estimate" }),
+          }),
+        );
+        setTeams(rankTeams(list));
+        setLoaded(true);
+      },
+      (err) => console.error("teams snapshot:", err),
+    );
+    return () => unsub();
+  }, []);
+  return [teams, loaded];
 }
 
 /* ================== ICON SET ================== */
@@ -1301,333 +564,577 @@ const Icon = {
       <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z" />
     </svg>
   ),
+  Lock: () => (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect width="18" height="11" x="3" y="11" rx="2" />
+      <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+    </svg>
+  ),
+  Trophy: () => (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6M18 9h1.5a2.5 2.5 0 0 0 0-5H18M4 22h16M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22" />
+      <path d="M18 2H6v7a6 6 0 0 0 12 0V2Z" />
+    </svg>
+  ),
+  Check: () => (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M20 6 9 17l-5-5" />
+    </svg>
+  ),
 };
+
+/* ================== INTEL FEED (Firestore) ================== */
+
+// intel_feed/{id} — teamName, message, timestamp, mapCoordinates
+//
+// "The Wire" is a public channel any enrolled agency can post to.
+// Nothing marks a post as true or false, and an attached map pin
+// looks the same either way — that's what makes bluffing possible.
+
+const INTEL_MAX = 140;
+const INTEL_LIMIT = 60;
+const INTEL_COOLDOWN_MS = 15000;
+
+async function postIntel({ team, message, coords }) {
+  const text = (message || "").trim().slice(0, INTEL_MAX);
+  if (!team) throw new Error("Enrol your agency before transmitting.");
+  if (!text) throw new Error("Nothing to transmit.");
+  await addDoc(collection(db, "intel_feed"), {
+    teamName: team.teamName,
+    message: text,
+    timestamp: serverTimestamp(),
+    mapCoordinates: coords ? { lat: coords[0], lng: coords[1] } : null,
+  });
+}
+
+// Latest INTEL_LIMIT posts, oldest first (the terminal appends at the
+// bottom). Each entry carries resolved `coords` or null.
+function useIntel() {
+  const [intel, setIntel] = useState([]);
+  useEffect(() => {
+    const q = query(
+      collection(db, "intel_feed"),
+      orderBy("timestamp", "desc"),
+      limit(INTEL_LIMIT),
+    );
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        const list = [];
+        snap.forEach((d) => {
+          const data = d.data({ serverTimestamps: "estimate" });
+          list.push({
+            id: d.id,
+            ...data,
+            coords: toLatLng(data.mapCoordinates),
+          });
+        });
+        setIntel(list.reverse());
+      },
+      (err) => console.error("intel snapshot:", err),
+    );
+    return () => unsub();
+  }, []);
+  return intel;
+}
+
+/* ================== 3D TILT + REACTIVE BACKDROP ================== */
+
+const REDUCED_MOTION =
+  window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+
+// Cursor-tracking 3D tilt. Writes CSS variables that .tn-tilt in
+// styles.css turns into rotateX/rotateY plus a glare that follows the
+// pointer; no React re-render per mouse move. `max` is the tilt in
+// degrees at the element's edge — keep it small on large panels.
+function Tilt({ as: Tag = "div", max = 6, className, children, ...rest }) {
+  const ref = useRef(null);
+  const raf = useRef(0);
+
+  const handleMove = useCallback(
+    (e) => {
+      if (REDUCED_MOTION || e.pointerType === "touch") return;
+      const el = ref.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      const px = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+      const py = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+      cancelAnimationFrame(raf.current);
+      raf.current = requestAnimationFrame(() => {
+        el.dataset.tilting = "";
+        el.style.setProperty("--rx", `${((0.5 - py) * 2 * max).toFixed(2)}deg`);
+        el.style.setProperty("--ry", `${((px - 0.5) * 2 * max).toFixed(2)}deg`);
+        el.style.setProperty("--mx", `${(px * 100).toFixed(1)}%`);
+        el.style.setProperty("--my", `${(py * 100).toFixed(1)}%`);
+      });
+    },
+    [max],
+  );
+
+  const handleLeave = useCallback(() => {
+    cancelAnimationFrame(raf.current);
+    const el = ref.current;
+    if (!el) return;
+    delete el.dataset.tilting;
+    el.style.removeProperty("--rx");
+    el.style.removeProperty("--ry");
+  }, []);
+
+  useEffect(() => () => cancelAnimationFrame(raf.current), []);
+
+  return (
+    <Tag
+      ref={ref}
+      className={cn("tn-tilt", className)}
+      onPointerMove={handleMove}
+      onPointerLeave={handleLeave}
+      {...rest}
+    >
+      {children}
+    </Tag>
+  );
+}
+
+// Fixed backdrop: scrolling perspective grid + a particle field that
+// is pushed away from the cursor and wires itself to it + a spotlight
+// that follows the pointer.
+function CyberBackground() {
+  const rootRef = useRef(null);
+  const canvasRef = useRef(null);
+
+  useEffect(() => {
+    const root = rootRef.current;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    const REPEL = 130;
+    const LINK = 110;
+    const CURSOR_LINK = 180;
+    const mouse = { x: -9999, y: -9999 };
+    let w = 0;
+    let h = 0;
+    let raf = 0;
+    let particles = [];
+
+    const resize = () => {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      w = window.innerWidth;
+      h = window.innerHeight;
+      canvas.width = w * dpr;
+      canvas.height = h * dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const count = Math.min(90, Math.round((w * h) / 22000));
+      particles = Array.from({ length: count }, () => ({
+        x: Math.random() * w,
+        y: Math.random() * h,
+        vx: (Math.random() - 0.5) * 0.25,
+        vy: -(0.08 + Math.random() * 0.28),
+        r: 0.6 + Math.random() * 1.4,
+      }));
+      if (REDUCED_MOTION) draw();
+    };
+
+    const draw = () => {
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = "#3dffa2";
+      ctx.strokeStyle = "#3dffa2";
+      ctx.lineWidth = 1;
+
+      for (const p of particles) {
+        const dx = p.x - mouse.x;
+        const dy = p.y - mouse.y;
+        const d = Math.hypot(dx, dy);
+        if (d < REPEL && d > 0.01) {
+          const push = (1 - d / REPEL) * 2.6;
+          p.x += (dx / d) * push;
+          p.y += (dy / d) * push;
+        }
+        p.x += p.vx;
+        p.y += p.vy;
+        if (p.y < -10) p.y = h + 10;
+        if (p.x < -10) p.x = w + 10;
+        if (p.x > w + 10) p.x = -10;
+
+        ctx.globalAlpha = 0.55;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fill();
+
+        if (d < CURSOR_LINK) {
+          ctx.globalAlpha = (1 - d / CURSOR_LINK) * 0.5;
+          ctx.beginPath();
+          ctx.moveTo(p.x, p.y);
+          ctx.lineTo(mouse.x, mouse.y);
+          ctx.stroke();
+        }
+      }
+
+      for (let i = 0; i < particles.length; i++) {
+        for (let j = i + 1; j < particles.length; j++) {
+          const a = particles[i];
+          const b = particles[j];
+          const d = Math.hypot(a.x - b.x, a.y - b.y);
+          if (d < LINK) {
+            ctx.globalAlpha = (1 - d / LINK) * 0.16;
+            ctx.beginPath();
+            ctx.moveTo(a.x, a.y);
+            ctx.lineTo(b.x, b.y);
+            ctx.stroke();
+          }
+        }
+      }
+
+      if (!REDUCED_MOTION) raf = requestAnimationFrame(draw);
+    };
+
+    const onMove = (e) => {
+      mouse.x = e.clientX;
+      mouse.y = e.clientY;
+      root.style.setProperty("--cx", `${e.clientX}px`);
+      root.style.setProperty("--cy", `${e.clientY}px`);
+      root.style.setProperty(
+        "--gx",
+        `${((e.clientX / w - 0.5) * -48).toFixed(1)}px`,
+      );
+    };
+    const onLeave = () => {
+      mouse.x = mouse.y = -9999;
+    };
+    const onVisibility = () => {
+      cancelAnimationFrame(raf);
+      if (!document.hidden && !REDUCED_MOTION) raf = requestAnimationFrame(draw);
+    };
+
+    resize();
+    if (!REDUCED_MOTION) raf = requestAnimationFrame(draw);
+    window.addEventListener("resize", resize);
+    window.addEventListener("pointermove", onMove, { passive: true });
+    document.documentElement.addEventListener("pointerleave", onLeave);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("resize", resize);
+      window.removeEventListener("pointermove", onMove);
+      document.documentElement.removeEventListener("pointerleave", onLeave);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, []);
+
+  return (
+    <div ref={rootRef} className="tn-bg" aria-hidden="true">
+      <div className="tn-bg-grid" />
+      <canvas ref={canvasRef} className="tn-bg-canvas" />
+      <div className="tn-bg-glow" />
+      <div className="tn-bg-scan" />
+    </div>
+  );
+}
+
+// "Decrypts" text left to right: unrevealed characters flicker as
+// cipher glyphs until the reveal front passes them.
+const CIPHER_GLYPHS = "█▓▒░<>/\\[]{}#%&01";
+function useScramble(text, duration = 900) {
+  const [out, setOut] = useState(text);
+  useEffect(() => {
+    const full = String(text ?? "");
+    if (REDUCED_MOTION || !full) {
+      setOut(full);
+      return;
+    }
+    let raf = 0;
+    const start = performance.now();
+    const tick = (now) => {
+      const p = Math.min(1, (now - start) / duration);
+      const shown = Math.floor(full.length * p);
+      let s = full.slice(0, shown);
+      for (let i = shown; i < full.length; i++) {
+        s += /\s/.test(full[i])
+          ? full[i]
+          : CIPHER_GLYPHS[(Math.random() * CIPHER_GLYPHS.length) | 0];
+      }
+      setOut(s);
+      if (p < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [text, duration]);
+  return out;
+}
+
+function SectionHeading({ label, lead, accent, blurb, children }) {
+  return (
+    <div className="flex items-end justify-between mb-4 flex-wrap gap-3">
+      <div>
+        <div className="tn-label tn-label-acc mb-1.5">// {label}</div>
+        <h2 className="tn-heading text-2xl sm:text-3xl lg:text-4xl">
+          {lead} <em>{accent}</em>
+        </h2>
+        {blurb && (
+          <p className="text-sm text-ch-mute mt-1.5 max-w-2xl">{blurb}</p>
+        )}
+      </div>
+      {children}
+    </div>
+  );
+}
 
 /* ================== TOP NAVBAR ================== */
 
-function TopNavbar({
-  user,
-  onSignIn,
-  onSignOut,
-  onShowMyPosts,
-  onShowAll,
-  viewingMyPosts,
-  onPostItem,
-  onOpenInbox,
-  inboxCount,
-  inboxUnread,
-}) {
+const NAV_LINKS = [
+  { href: "#ops", label: "Map" },
+  { href: "#ops", label: "Wire" },
+  { href: "#vault", label: "Vault" },
+  { href: "#leaderboard", label: "Ranks" },
+];
+
+function TopNavbar({ user, team, onSignIn, onSignOut }) {
   return (
-    <motion.nav
-      initial={{ y: -32, opacity: 0 }}
-      animate={{ y: 0, opacity: 1 }}
-      transition={{ duration: 0.6, ease: [0.16, 1, 0.3, 1] }}
-      className="sticky top-0 z-40 px-3 sm:px-6 lg:px-10 pt-3"
-    >
-      <div className="tn-glass-strong rounded-2xl px-3 sm:px-5 py-2.5 flex items-center justify-between gap-3">
-        <div className="flex items-center gap-3 min-w-0">
-          <div className="relative w-9 h-9 rounded-xl flex items-center justify-center bg-gradient-to-br from-cyan-500/30 to-purple-500/30 border border-cyan-400/30 shadow-[0_0_18px_rgba(34,211,238,0.3)] text-cyan-300 shrink-0">
-            <Icon.Logo />
-          </div>
-          <div className="leading-tight min-w-0">
-            <div className="font-semibold text-base tracking-tight truncate">
-              <span className="tn-gradient-text">TraceNet</span>
-              <span className="text-slate-100"> AI</span>
-            </div>
-            <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500 hidden sm:block">
-              Geo-Intelligent Recovery Network
-            </div>
-          </div>
-        </div>
+    <nav className="sticky top-0 z-40 px-3 sm:px-6 lg:px-10 pt-3 tn-rise">
+      <div className="tn-panel px-3 sm:px-4 py-2.5 flex items-center justify-between gap-3">
+        <a href="#top" className="flex items-center gap-3 min-w-0">
+          <span className="w-8 h-8 flex items-center justify-center border border-ch-acc/50 text-ch-acc shrink-0 rounded-[3px]">
+            <Icon.Search />
+          </span>
+          <span className="leading-tight min-w-0">
+            <span className="block font-mono font-semibold text-sm tracking-[0.14em] uppercase truncate text-white">
+              Baker_Street<span className="text-ch-acc">//</span>Hunt
+            </span>
+            <span className="tn-label hidden sm:block">
+              campus codehunt · detective agency
+            </span>
+          </span>
+        </a>
 
         <div className="flex items-center gap-2">
-          <div className="hidden md:flex items-center gap-2 text-xs text-slate-400 px-3 py-1.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
-            <span className="relative flex w-2 h-2">
-              <span className="absolute inset-0 rounded-full bg-emerald-400 animate-ping opacity-60"></span>
-              <span className="relative w-2 h-2 rounded-full bg-emerald-400"></span>
-            </span>
-            <span className="font-mono">NETWORK ONLINE</span>
+          <div className="hidden lg:flex items-center gap-1">
+            {NAV_LINKS.map((l) => (
+              <a
+                key={l.label}
+                href={l.href}
+                className="px-2.5 py-1.5 font-mono text-[11px] uppercase tracking-[0.14em] text-ch-mute hover:text-ch-acc transition-colors"
+              >
+                {l.label}
+              </a>
+            ))}
           </div>
 
-          {user && (
-            <button
-              onClick={onOpenInbox}
-              className="relative tn-btn tn-btn-ghost px-2.5"
-              title="Claims & messages"
-              aria-label="Open claims inbox"
+          {team && (
+            <div
+              className="tn-chip hidden sm:inline-flex max-w-[220px]"
+              title="Your agency"
             >
-              <svg
-                width="16"
-                height="16"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
-                <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
-              </svg>
-              {inboxCount > 0 && (
-                <span className="ml-1 text-[10px] font-mono text-slate-400 tabular-nums">
-                  {inboxCount}
-                </span>
-              )}
-              {inboxUnread > 0 && (
-                <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-cyan-400 text-[10px] font-mono font-bold text-slate-950 flex items-center justify-center shadow-[0_0_10px_rgba(34,211,238,0.7)]">
-                  {inboxUnread > 9 ? "9+" : inboxUnread}
-                </span>
-              )}
-            </button>
-          )}
-
-          {user && (
-            <div className="flex p-0.5 sm:p-1 rounded-xl bg-white/[0.04] border border-white/[0.06] text-[10px] sm:text-[11px] font-mono">
-              {[
-                {
-                  k: "all",
-                  label: "All Posts",
-                  active: !viewingMyPosts,
-                  onClick: onShowAll,
-                },
-                {
-                  k: "mine",
-                  label: "My Posts",
-                  active: viewingMyPosts,
-                  onClick: onShowMyPosts,
-                },
-              ].map((p) => (
-                <button
-                  key={p.k}
-                  onClick={p.onClick}
-                  className={cn(
-                    "px-2.5 sm:px-3 py-1 sm:py-1.5 rounded-lg uppercase tracking-wider transition-colors",
-                    p.active
-                      ? "bg-gradient-to-br from-cyan-500/30 to-purple-500/30 text-white border border-white/[0.12] shadow-[0_0_14px_rgba(34,211,238,0.25)]"
-                      : "text-slate-400 hover:text-slate-200",
-                  )}
-                >
-                  {p.label}
-                </button>
-              ))}
+              <span className="truncate">{team.teamName}</span>
+              <span className="text-white tabular-nums">
+                {team.score || 0}
+              </span>
             </div>
           )}
 
-          {user ? (
-            <button onClick={onSignOut} className="tn-btn tn-btn-ghost">
-              Sign out
-            </button>
-          ) : (
-            <button onClick={onSignIn} className="tn-btn tn-btn-ghost">
-              Sign in
-            </button>
-          )}
+          <Tilt
+            as="button"
+            max={14}
+            onClick={user ? onSignOut : onSignIn}
+            className="tn-btn tn-btn-ghost"
+          >
+            {user ? "Sign out" : "Sign in"}
+          </Tilt>
 
-          <button onClick={onPostItem} className="tn-btn tn-btn-primary">
-            <Icon.Plus />
-            <span className="hidden sm:inline">Report Item</span>
-          </button>
+          <Tilt
+            as="a"
+            max={14}
+            href="#vault"
+            className="tn-btn tn-btn-primary"
+          >
+            <Icon.Lock />
+            <span className="hidden sm:inline">Vault</span>
+          </Tilt>
         </div>
       </div>
-    </motion.nav>
+    </nav>
   );
 }
 
 /* ================== HERO ================== */
 
-function Hero({ items, onPostItem }) {
-  const taglines = useMemo(
-    () => [
-      "Cross-referencing geo-signatures…",
-      "Detecting probabilistic matches…",
-      "Indexing fraud patterns in real-time…",
-      "Reuniting objects with owners.",
-    ],
-    [],
-  );
-  const [tagIdx, setTagIdx] = useState(0);
+const HERO_LINES = [
+  "the game is afoot.",
+  "you see, but you do not observe.",
+  "eliminate the impossible. whatever remains is the truth.",
+  "trust nothing on the wire.",
+];
+
+function Hero({ clueCount, solvedCount, team, teamCount, intelCount }) {
+  const [lineIdx, setLineIdx] = useState(0);
   useEffect(() => {
     const t = setInterval(
-      () => setTagIdx((i) => (i + 1) % taglines.length),
-      3500,
+      () => setLineIdx((i) => (i + 1) % HERO_LINES.length),
+      4200,
     );
     return () => clearInterval(t);
-  }, [taglines.length]);
+  }, []);
+  const line = useScramble(HERO_LINES[lineIdx], 700);
+
+  const readout = [
+    ["case files", clueCount || "—"],
+    ["agencies online", teamCount],
+    ["wire traffic", intelCount],
+    [
+      "your progress",
+      team ? `${solvedCount} / ${clueCount || "—"}` : "not enrolled",
+    ],
+  ];
 
   return (
-    <section className="relative px-3 sm:px-6 lg:px-10 pt-5">
-      <div className="relative tn-glass rounded-3xl overflow-hidden">
-        <div className="absolute inset-0 tn-grid-bg opacity-50" />
-        <div className="absolute inset-0 tn-hero-radial" />
-        <div className="absolute -top-32 -right-24 w-96 h-96 rounded-full bg-purple-500/20 blur-3xl" />
-        <div className="absolute -bottom-32 -left-24 w-96 h-96 rounded-full bg-cyan-500/20 blur-3xl" />
-        <div className="absolute inset-0 pointer-events-none rounded-3xl tn-grad-border opacity-60" />
-
-        <div className="relative px-6 sm:px-10 lg:px-14 py-12 sm:py-16 lg:py-20 max-w-5xl">
-          <motion.div
-            initial={{ opacity: 0, y: 16 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.7 }}
-            className="inline-flex items-center gap-2 px-3 py-1.5 mb-6 rounded-full bg-white/[0.04] border border-white/[0.08] text-xs text-slate-300 font-mono"
-          >
-            <span className="text-cyan-300">
-              <Icon.Sparkles />
-            </span>
-            <span>v1.0 · neural recovery engine</span>
-          </motion.div>
-
-          <motion.h1
-            initial={{ opacity: 0, y: 16 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.8, delay: 0.1 }}
-            className="tn-hero-title font-semibold tracking-tight mb-4"
-          >
-            <span className="tn-gradient-text">TraceNet AI</span>
-          </motion.h1>
-
-          <motion.p
-            initial={{ opacity: 0, y: 16 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.8, delay: 0.2 }}
-            className="text-lg sm:text-xl lg:text-2xl text-slate-300 max-w-2xl mb-2"
-          >
-            Geo-Intelligent Recovery Network
-          </motion.p>
-
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ duration: 0.7, delay: 0.4 }}
-            className="text-sm text-slate-500 font-mono h-6 mb-8"
-          >
-            <AnimatePresence mode="wait">
-              <motion.span
-                key={tagIdx}
-                initial={{ opacity: 0, y: 6 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -6 }}
-                transition={{ duration: 0.4 }}
-                className="inline-block"
-              >
-                <span className="text-cyan-400">›</span> {taglines[tagIdx]}
-              </motion.span>
-            </AnimatePresence>
-          </motion.div>
-
-          <motion.div
-            initial={{ opacity: 0, y: 16 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.7, delay: 0.5 }}
-            className="flex flex-wrap items-center gap-3"
-          >
-            <button
-              onClick={onPostItem}
-              className="tn-btn tn-btn-primary px-5 py-3 text-sm"
-            >
-              <Icon.Plus />
-              Report a New Item
-            </button>
-            <a
-              href="#network-map"
-              className="tn-btn tn-btn-ghost px-5 py-3 text-sm"
-            >
-              <Icon.Globe />
-              Explore the network
-            </a>
-            <div className="hidden md:flex items-center gap-2 ml-2 text-xs text-slate-500 font-mono">
-              <span className="w-1 h-1 rounded-full bg-cyan-400" />
-              <span>{items.length} active records</span>
+    <section id="top" className="px-3 sm:px-6 lg:px-10 pt-5 scroll-mt-24">
+      <Tilt max={3} className="tn-panel tn-rise">
+        <div className="tn-3d grid grid-cols-1 lg:grid-cols-3 gap-8 px-6 sm:px-10 lg:px-14 py-12 sm:py-16">
+          <div className="tn-3d lg:col-span-2">
+            <div className="tn-z1 tn-chip mb-6">
+              <span className="tn-dot" />
+              221B uplink · live
             </div>
-          </motion.div>
+
+            <h1 className="tn-z3 tn-heading tn-hero-title mb-5">
+              Baker Street
+              <br />
+              <em>Codehunt</em>
+            </h1>
+
+            <p className="tn-z2 text-base sm:text-lg text-slate-300 max-w-xl mb-3">
+              Crack the riddle. Reach the drop point. Decrypt the vault.
+              Mislead everyone else on the wire while you do it.
+            </p>
+
+            <div className="tn-z1 font-mono text-sm text-ch-mute h-6 mb-8 truncate">
+              <span className="text-ch-acc">&gt;</span>{" "}
+              <span className="tn-caret">{line}</span>
+            </div>
+
+            <div className="tn-z2 tn-3d flex flex-wrap items-center gap-3">
+              <Tilt
+                as="a"
+                max={14}
+                href="#vault"
+                className="tn-btn tn-btn-primary px-5 py-3.5"
+              >
+                <Icon.Lock />
+                Open the vault
+              </Tilt>
+              <Tilt
+                as="a"
+                max={14}
+                href="#ops"
+                className="tn-btn tn-btn-ghost px-5 py-3.5"
+              >
+                <Icon.Globe />
+                Survey the map
+              </Tilt>
+            </div>
+          </div>
+
+          <div className="tn-z2 self-center w-full border border-ch-acc/20 bg-black/50 rounded-[4px] font-mono text-xs">
+            <div className="px-3 py-2 border-b border-ch-acc/15 tn-label tn-label-acc">
+              mission_status
+            </div>
+            <dl className="px-3 py-2">
+              {readout.map(([k, v]) => (
+                <div
+                  key={k}
+                  className="flex items-center justify-between gap-4 py-1.5 border-b border-white/[0.04] last:border-0"
+                >
+                  <dt className="text-ch-mute">{k}</dt>
+                  <dd className="text-white tabular-nums">{v}</dd>
+                </div>
+              ))}
+            </dl>
+          </div>
         </div>
-      </div>
+      </Tilt>
     </section>
   );
 }
 
-/* ================== STAT CARD + LIVE STATS ================== */
+/* ================== LIVE STATS ================== */
 
-function StatCard({ icon, label, value, suffix, gradient, delay = 0 }) {
+function StatCard({ icon, label, value, delay = 0 }) {
   const animated = useAnimatedNumber(value || 0);
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 18 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.6, delay }}
-      whileHover={{ y: -4 }}
-      className="relative tn-glass rounded-2xl p-5 overflow-hidden group"
+    <Tilt
+      max={10}
+      className="tn-panel tn-rise p-4 sm:p-5"
+      style={{ animationDelay: `${delay}s` }}
     >
-      <div
-        className={cn(
-          "absolute -top-12 -right-12 w-32 h-32 rounded-full blur-3xl opacity-40 group-hover:opacity-70 transition-opacity",
-          gradient,
-        )}
-      />
-      <div className="relative flex items-start justify-between mb-3">
-        <div
-          className={cn(
-            "w-9 h-9 rounded-lg flex items-center justify-center text-white shadow-[0_0_18px_rgba(34,211,238,0.2)]",
-            gradient,
-          )}
-        >
+      <div className="tn-z1 flex items-center justify-between mb-4">
+        <span className="w-8 h-8 flex items-center justify-center border border-ch-acc/40 text-ch-acc rounded-[3px]">
           {icon}
-        </div>
-        <div className="text-[10px] text-slate-500 font-mono uppercase tracking-wider flex items-center gap-1">
-          <span className="w-1 h-1 rounded-full bg-emerald-400 animate-pulse" />
+        </span>
+        <span className="tn-label flex items-center gap-1.5">
+          <span className="tn-dot" />
           live
-        </div>
+        </span>
       </div>
-      <div className="relative">
-        <div className="text-3xl font-semibold font-mono tracking-tight tabular-nums text-slate-50">
-          {Math.round(animated)}
-          {suffix || ""}
-        </div>
-        <div className="text-[11px] text-slate-400 mt-1 uppercase tracking-[0.16em]">
-          {label}
-        </div>
+      <div className="tn-z3 text-3xl sm:text-4xl font-semibold font-mono tabular-nums text-white">
+        {Math.round(animated)}
       </div>
-    </motion.div>
+      <div className="tn-z1 tn-label mt-1.5">{label}</div>
+    </Tilt>
   );
 }
 
-function LiveStats({ items }) {
-  const total = items.length;
-  const lost = items.filter((i) => i.type === "lost").length;
-  const found = items.filter((i) => i.type === "found").length;
-  const recoveryRate = total ? Math.round((found / total) * 100) : 0;
-
+function LiveStats({ clueCount, solvedCount, team, teamCount }) {
+  const unlocked = team ? Math.min(solvedCount + 1, clueCount) : 0;
   return (
-    <section className="px-3 sm:px-6 lg:px-10 pt-6">
+    <section className="px-3 sm:px-6 lg:px-10 pt-5">
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
         <StatCard
-          delay={0.0}
-          icon={<Icon.Activity />}
-          label="Items Tracked"
-          value={total}
-          gradient="bg-gradient-to-br from-cyan-400 to-cyan-700"
+          delay={0.05}
+          icon={<Icon.Search />}
+          label="Files unlocked"
+          value={unlocked}
         />
         <StatCard
-          delay={0.08}
-          icon={<Icon.Alert />}
-          label="Lost Reports"
-          value={lost}
-          gradient="bg-gradient-to-br from-amber-400 to-orange-600"
+          delay={0.1}
+          icon={<Icon.Check />}
+          label="Vaults breached"
+          value={solvedCount}
         />
         <StatCard
-          delay={0.16}
-          icon={<Icon.Sparkles />}
-          label="Found Reports"
-          value={found}
-          gradient="bg-gradient-to-br from-emerald-400 to-teal-600"
+          delay={0.15}
+          icon={<Icon.Bolt />}
+          label="Your score"
+          value={team?.score || 0}
         />
         <StatCard
-          delay={0.24}
-          icon={<Icon.TrendUp />}
-          label="Recovery Index"
-          value={recoveryRate}
-          suffix="%"
-          gradient="bg-gradient-to-br from-purple-400 to-pink-600"
+          delay={0.2}
+          icon={<Icon.Shield />}
+          label="Agencies online"
+          value={teamCount}
         />
       </div>
     </section>
@@ -1636,14 +1143,35 @@ function LiveStats({ items }) {
 
 /* ================== INTERACTIVE MAP ================== */
 
+const PIN_COLOR = {
+  open: "#3dffa2",
+  solved: "#6ad7ff",
+  intel: "#ffb224",
+};
+
+const NO_PINS = []; // stable identity so a filtered-out source doesn't re-render pins
+
+const validLatLng = (c) =>
+  Array.isArray(c) && Number.isFinite(c[0]) && Number.isFinite(c[1]);
+
+// Two live sources feed the map:
+//   cluePins  — clues this team has unlocked (status "solved" | "open").
+//               Sealed clues are never passed in.
+//   intelPins — Wire posts that carry mapCoordinates. Unverified.
+// `draftPin` is the not-yet-sent pin for the Wire composer; while
+// `picking` is true the next map click reports its position to onPick.
+//
+// The Leaflet canvas itself is deliberately not tilted: Leaflet maps
+// pointer positions through its own 2D transforms, so a CSS 3D rotation
+// on an ancestor makes clicks and drags land in the wrong place.
 function InteractiveMap({
-  items,
-  currentUser,
-  claims = [],
-  claimBusy,
-  onClaim,
-  onOpenChat,
-  onRequireSignIn,
+  cluePins,
+  intelPins,
+  draftPin,
+  picking,
+  onPick,
+  emptyHint,
+  focus,
 }) {
   const mapEl = useRef(null);
   const mapInstance = useRef(null);
@@ -1651,27 +1179,16 @@ function InteractiveMap({
   const radiusLayer = useRef(null);
   const linksLayer = useRef(null);
   const markersById = useRef(new Map());
-  const [filter, setFilter] = useState("all");
-  const [selectedId, setSelectedId] = useState(null);
-  const [cardItem, setCardItem] = useState(null);
+  const [mapReady, setMapReady] = useState(false);
+  const [filter, setFilter] = useState("all"); // all | clues | intel
   const [scrollZoom, setScrollZoom] = useState(false);
   const [userLocation, setUserLocation] = useState(null); // { coords:[lat,lon], accuracy }
   const [locating, setLocating] = useState(false);
   const [locError, setLocError] = useState(null);
 
-  const itemsWithCoords = useMemo(
-    () => items.map((i) => ({ ...i, coords: itemCoords(i) })),
-    [items],
-  );
-
-  const visibleItems = useMemo(() => {
-    if (filter === "all") return itemsWithCoords;
-    if (filter === "recovered")
-      return itemsWithCoords.filter((i) => isRecoveredItem(i));
-    return itemsWithCoords.filter(
-      (i) => (i.type || "").toString().trim().toLowerCase() === filter,
-    );
-  }, [itemsWithCoords, filter]);
+  const visibleClues = filter === "intel" ? NO_PINS : cluePins;
+  const visibleIntel = filter === "clues" ? NO_PINS : intelPins;
+  const visibleCount = visibleClues.length + visibleIntel.length;
 
   // One-time map init — defensive against load-order races and
   // post-mount layout shifts (Tailwind CDN JIT, fonts, responsive
@@ -1689,7 +1206,7 @@ function InteractiveMap({
       try {
         m.invalidateSize({ animate: false });
       } catch (e) {
-        console.warn("[TraceNet] invalidateSize failed", e);
+        console.warn("[BakerStreet] invalidateSize failed", e);
       }
     };
 
@@ -1707,13 +1224,13 @@ function InteractiveMap({
           preferCanvas: false,
         });
 
-        // Base dark tiles (CartoDB) + label overlay
+        // OpenStreetMap standard tiles (no API key). They are light;
+        // .leaflet-tile-pane in styles.css inverts them to match the HUD.
         const base = L.tileLayer(
-          "https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png",
+          "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
           {
             attribution:
-              '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
-            subdomains: "abcd",
+              '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
             maxZoom: 19,
             crossOrigin: true,
           },
@@ -1723,7 +1240,7 @@ function InteractiveMap({
           tileErrorCount++;
           if (tileErrorCount <= 3) {
             console.warn(
-              "[TraceNet] tile error",
+              "[BakerStreet] tile error",
               e?.tile?.src || "(no src)",
               "— check network/CDN",
             );
@@ -1731,20 +1248,11 @@ function InteractiveMap({
         });
         base.addTo(map);
 
-        L.tileLayer(
-          "https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png",
-          { subdomains: "abcd", maxZoom: 19, crossOrigin: true },
-        ).addTo(map);
-
         radiusLayer.current = L.layerGroup().addTo(map);
         linksLayer.current = L.layerGroup().addTo(map);
         markersLayer.current = L.layerGroup().addTo(map);
         mapInstance.current = map;
-
-        map.on("click", () => {
-          setSelectedId(null);
-          setCardItem(null);
-        });
+        setMapReady(true);
 
         // Force size recalculation. Leaflet measures the container
         // once on init; we need to retry after the next paint and
@@ -1765,7 +1273,7 @@ function InteractiveMap({
         window.addEventListener("orientationchange", invalidate);
         window.addEventListener("load", invalidate);
       } catch (err) {
-        console.error("[TraceNet] map init failed:", err);
+        console.error("[BakerStreet] map init failed:", err);
       }
     };
 
@@ -1779,7 +1287,7 @@ function InteractiveMap({
       }
       if (attempt >= 100) {
         console.error(
-          "[TraceNet] window.L never became available — Leaflet failed to load",
+          "[BakerStreet] window.L never became available — Leaflet failed to load",
         );
         return;
       }
@@ -1801,7 +1309,7 @@ function InteractiveMap({
         try {
           mapInstance.current.remove();
         } catch (e) {
-          console.warn("[TraceNet] map cleanup error", e);
+          console.warn("[BakerStreet] map cleanup error", e);
         }
         mapInstance.current = null;
       }
@@ -1819,355 +1327,217 @@ function InteractiveMap({
     else mapInstance.current.scrollWheelZoom.disable();
   }, [scrollZoom]);
 
-  // Render markers, radii, and connections
+  // Pin-drop mode: the next map click becomes the Wire draft pin
+  useEffect(() => {
+    const map = mapInstance.current;
+    if (!map || !picking) return;
+    const onClick = (e) => onPick([e.latlng.lat, e.latlng.lng]);
+    map.on("click", onClick);
+    return () => map.off("click", onClick);
+  }, [picking, onPick, mapReady]);
+
+  // Render clue pins, intel pins, the draft pin, and the trail
   useEffect(() => {
     if (!mapInstance.current || !markersLayer.current || !window.L) return;
     const L = window.L;
-    const map = mapInstance.current;
 
     markersLayer.current.clearLayers();
     radiusLayer.current.clearLayers();
     linksLayer.current.clearLayers();
     markersById.current.clear();
 
-    // One-shot diagnostic so missing markers are easy to find in DevTools.
-    const counts = { lost: 0, found: 0, recovered: 0, skipped: 0, unknown: 0 };
-
-    visibleItems.forEach((item) => {
-      const coords = item.coords;
-      if (
-        !Array.isArray(coords) ||
-        !Number.isFinite(coords[0]) ||
-        !Number.isFinite(coords[1])
-      ) {
-        counts.skipped++;
-        return; // skip — itemCoords always provides a fallback so this is rare
-      }
-      const [lat, lng] = coords;
-      const recovered = isRecoveredItem(item);
-      // Defensive: normalize so "Lost", " found ", etc. all work.
-      const t = (item.type || "").toString().trim().toLowerCase();
-      const isLost = t === "lost";
-      const isFound = t === "found";
-      if (!isLost && !isFound) {
-        counts.unknown++;
-        if (counts.unknown <= 3) {
-          console.warn(
-            "[TraceNet] item with unrecognized type:",
-            JSON.stringify(item.type),
-            "id=",
-            item.id,
-            "→ rendering as found",
-          );
-        }
-      }
-
-      // Determine kind in priority order: recovered overrides lost/found
-      const kind = recovered ? "recovered" : isLost ? "lost" : "found";
-      counts[kind]++;
-      const color =
-        kind === "recovered"
-          ? "#fbbf24" // amber/gold
-          : kind === "lost"
-            ? "#fb7185" // rose
-            : "#34d399"; // emerald
-
-      const isSelected = item.id === selectedId;
-      const isDimmed = !!selectedId && !isSelected;
-      const glyph = CAT_GLYPH[item.category] || "📍";
-
-      // Radius circle — sized & weighted so each kind reads
-      // even at zoom-out:
-      //   lost      → urgent rose, thicker dashed ring
-      //   found     → calmer emerald, thin dashed ring
-      //   recovered → wide gold dotted ring
-      L.circle([lat, lng], {
-        radius: kind === "recovered" ? 420 : 350,
-        color,
-        weight: kind === "lost" ? 1.8 : kind === "recovered" ? 1.4 : 1,
-        opacity: isDimmed
-          ? 0.18
-          : kind === "lost"
-            ? 0.85
-            : kind === "recovered"
-              ? 0.7
-              : 0.55,
-        fillColor: color,
-        fillOpacity: isDimmed
-          ? 0.02
-          : kind === "lost"
-            ? 0.14
-            : kind === "recovered"
-              ? 0.1
-              : 0.07,
-        dashArray:
-          kind === "recovered" ? "2 6" : kind === "lost" ? "3 5" : "4 6",
-        interactive: false,
-      }).addTo(radiusLayer.current);
-
-      // Custom marker — three visual variants
-      const recoveryBadge =
-        kind === "recovered" ? '<span class="tn-mk-check">✓</span>' : "";
-      const extraRing =
-        kind === "recovered"
-          ? '<span class="tn-mk-pulse tn-mk-pulse-2"></span>'
-          : "";
-      const html = `
-        <div class="tn-mk tn-mk-${kind} ${isSelected ? "tn-mk-active" : ""} ${isDimmed ? "tn-mk-dim" : ""}" style="--c:${color}">
-          <span class="tn-mk-pulse"></span>
-          ${extraRing}
-          <span class="tn-mk-core">${glyph}</span>
-          ${recoveryBadge}
-        </div>
-      `;
+    const addMarker = ({ id, coords, kind, glyph, popupHtml, zIndexOffset }) => {
+      const color = PIN_COLOR[kind === "draft" ? "intel" : kind];
       const icon = L.divIcon({
         className: "tn-marker-icon",
-        html,
+        html: `
+          <div class="tn-mk tn-mk-${kind}" style="--c:${color}">
+            <span class="tn-mk-pulse"></span>
+            <span class="tn-mk-core"><b>${glyph}</b></span>
+          </div>
+        `,
         iconSize: [34, 34],
         iconAnchor: [17, 17],
       });
-      const marker = L.marker([lat, lng], { icon, riseOnHover: true });
-      marker.on("click", () => {
-        setSelectedId(item.id);
-        setCardItem(item);
+      const marker = L.marker(coords, {
+        icon,
+        riseOnHover: true,
+        zIndexOffset,
+        interactive: !!popupHtml,
       });
+      if (popupHtml) {
+        marker.bindPopup(popupHtml, {
+          maxWidth: 260,
+          minWidth: 220,
+          offset: [0, -10],
+        });
+      }
       marker.addTo(markersLayer.current);
-      markersById.current.set(item.id, marker);
+      if (id) markersById.current.set(id, marker);
+    };
+
+    visibleClues.forEach((pin) => {
+      const [lat, lng] = pin.coords;
+      const solved = pin.status === "solved";
+      const color = PIN_COLOR[pin.status];
+      const order = escapeHtml(pin.order ?? "?");
+
+      L.circle(pin.coords, {
+        radius: solved ? 40 : 60,
+        color,
+        weight: solved ? 1 : 1.6,
+        opacity: solved ? 0.5 : 0.85,
+        fillColor: color,
+        fillOpacity: solved ? 0.04 : 0.12,
+        dashArray: "3 5",
+        interactive: false,
+      }).addTo(radiusLayer.current);
+
+      addMarker({
+        id: pin.id,
+        coords: pin.coords,
+        kind: pin.status,
+        glyph: solved ? "✓" : order,
+        zIndexOffset: solved ? 0 : 500,
+        popupHtml: `
+          <div class="tn-pop">
+            <div class="tn-pop-head">
+              <span class="tn-pop-badge" style="--c:${color}">${solved ? "Breached" : "Target"}</span>
+              <span class="tn-pop-cat">File ${order}</span>
+            </div>
+            <div class="tn-pop-title">${escapeHtml(pin.title || "Untitled file")}</div>
+            <div class="tn-pop-meta">
+              <div>${lat.toFixed(5)}, ${lng.toFixed(5)}</div>
+              <div>${solved ? "passcode recovered here" : "search here for the passcode"}</div>
+            </div>
+          </div>
+        `,
+      });
     });
 
-    // Diagnostic summary (non-spammy: one line per render).
-    if (visibleItems.length > 0) {
-      console.info(
-        `[TraceNet] map render — lost:${counts.lost} found:${counts.found} recovered:${counts.recovered} unknown:${counts.unknown} skipped:${counts.skipped} (filter=${filter})`,
-      );
-    }
-
-    // Nearby visualization for selected
-    if (selectedId) {
-      const selected = visibleItems.find((i) => i.id === selectedId);
-      if (selected) {
-        const sLatLng = L.latLng(selected.coords);
-        const nearby = visibleItems
-          .filter((i) => i.id !== selectedId)
-          .map((i) => ({
-            item: i,
-            d: map.distance(sLatLng, L.latLng(i.coords)),
-          }))
-          .filter((x) => x.d < 1000)
-          .sort((a, b) => a.d - b.d)
-          .slice(0, 8);
-
-        nearby.forEach(({ item }) => {
-          const isPair = item.type !== selected.type;
-          L.polyline([selected.coords, item.coords], {
-            color: isPair ? "#a855f7" : "#22d3ee",
-            weight: isPair ? 2.2 : 1.4,
-            opacity: 0.85,
-            dashArray: isPair ? "8 8" : "5 6",
-            className: "tn-link",
-            interactive: false,
-          }).addTo(linksLayer.current);
-        });
-
-        // Outer search halo
-        L.circle(selected.coords, {
-          radius: 1000,
-          color: "#22d3ee",
-          weight: 1.5,
-          opacity: 0.55,
-          fillColor: "#22d3ee",
-          fillOpacity: 0.04,
-          dashArray: "8 6",
+    // The trail so far — joins unlocked clue pins in file order
+    if (visibleClues.length > 1) {
+      L.polyline(
+        visibleClues.map((p) => p.coords),
+        {
+          color: PIN_COLOR.solved,
+          weight: 1.4,
+          opacity: 0.6,
+          dashArray: "6 8",
+          className: "tn-link",
           interactive: false,
-        }).addTo(linksLayer.current);
-      }
+        },
+      ).addTo(linksLayer.current);
     }
 
-    // "You are here" marker + accuracy + 2km nearby halo
+    // Wire intel — message text is user-supplied, so always escaped
+    visibleIntel.forEach((post) => {
+      addMarker({
+        id: `intel:${post.id}`,
+        coords: post.coords,
+        kind: "intel",
+        glyph: "!",
+        popupHtml: `
+          <div class="tn-pop">
+            <div class="tn-pop-head">
+              <span class="tn-pop-badge" style="--c:${PIN_COLOR.intel}">Unverified</span>
+              <span class="tn-pop-cat">${escapeHtml(formatRelativeTime(post.timestamp) || "just now")}</span>
+            </div>
+            <div class="tn-pop-title">${escapeHtml(post.message)}</div>
+            <div class="tn-pop-meta">
+              <div>source: ${escapeHtml(post.teamName || "unknown")}</div>
+              <div>${post.coords[0].toFixed(5)}, ${post.coords[1].toFixed(5)}</div>
+            </div>
+          </div>
+        `,
+      });
+    });
+
+    if (validLatLng(draftPin)) {
+      addMarker({
+        coords: draftPin,
+        kind: "draft",
+        glyph: "+",
+        zIndexOffset: 900,
+      });
+    }
+
+    // "You are here" marker + accuracy circle
     if (userLocation && Array.isArray(userLocation.coords)) {
       const me = userLocation.coords;
-      const acc = Math.min(
-        Math.max(Number(userLocation.accuracy) || 50, 25),
-        500,
-      );
-
-      // Accuracy circle (real GPS uncertainty)
       L.circle(me, {
-        radius: acc,
-        color: "#22d3ee",
-        weight: 1.5,
-        opacity: 0.7,
-        fillColor: "#22d3ee",
-        fillOpacity: 0.1,
-        interactive: false,
-      }).addTo(linksLayer.current);
-
-      // 2km "nearby" halo
-      L.circle(me, {
-        radius: 2000,
-        color: "#22d3ee",
+        radius: Math.min(Math.max(Number(userLocation.accuracy) || 50, 25), 500),
+        color: "#6ad7ff",
         weight: 1.2,
-        opacity: 0.4,
-        fillColor: "#22d3ee",
-        fillOpacity: 0.025,
-        dashArray: "6 8",
+        opacity: 0.7,
+        fillColor: "#6ad7ff",
+        fillOpacity: 0.08,
         interactive: false,
       }).addTo(linksLayer.current);
 
-      // Glowing "You" pin
-      const html = `
-        <div class="tn-you">
-          <span class="tn-you-ring"></span>
-          <span class="tn-you-ring tn-you-ring-2"></span>
-          <span class="tn-you-core"></span>
-        </div>
-      `;
       const icon = L.divIcon({
         className: "tn-marker-icon",
-        html,
+        html: `
+          <div class="tn-you">
+            <span class="tn-you-ring"></span>
+            <span class="tn-you-ring tn-you-ring-2"></span>
+            <span class="tn-you-core"></span>
+          </div>
+        `,
         iconSize: [46, 46],
         iconAnchor: [23, 23],
       });
-      const popupHtml = `
-        <div class="tn-pop">
-          <div class="tn-pop-head">
-            <span class="tn-pop-badge" style="--c:#22d3ee">You</span>
-            <span class="tn-pop-cat"><span class="tn-pop-glyph">📡</span>Geolocation</span>
-          </div>
-          <div class="tn-pop-title">You are here</div>
-          <div class="tn-pop-meta">
-            <div><span>📍</span>${me[0].toFixed(4)}°, ${me[1].toFixed(4)}°</div>
-            <div><span>📡</span>±${Math.round(userLocation.accuracy || 0)} m accuracy</div>
-          </div>
-        </div>
-      `;
-      L.marker(me, { icon, zIndexOffset: 1000 })
-        .bindPopup(popupHtml, {
-          className: "tn-popup",
-          maxWidth: 240,
-          minWidth: 210,
-          offset: [0, -10],
-        })
-        .addTo(markersLayer.current);
+      L.marker(me, { icon, zIndexOffset: 1000, interactive: false }).addTo(
+        markersLayer.current,
+      );
     }
-  }, [visibleItems, selectedId, userLocation]);
+  }, [visibleClues, visibleIntel, draftPin, userLocation, mapReady]);
 
-  // If the selected/cardItem is filtered out (or removed from the
-  // collection), clear it gracefully.
-  useEffect(() => {
-    if (!cardItem) return;
-    const stillVisible = visibleItems.some((i) => i.id === cardItem.id);
-    if (!stillVisible) {
-      setCardItem(null);
-      setSelectedId(null);
-    }
-  }, [visibleItems, cardItem]);
-
-  const itemTypeOf = (i) => (i?.type || "").toString().trim().toLowerCase();
-  const lostCount = items.filter((i) => itemTypeOf(i) === "lost").length;
-  const foundCount = items.filter((i) => itemTypeOf(i) === "found").length;
-  const recoveredCount = items.filter((i) => isRecoveredItem(i)).length;
-  const selectedItem = selectedId
-    ? visibleItems.find((i) => i.id === selectedId)
-    : null;
-
-  const handleReset = () => {
-    setSelectedId(null);
-    if (mapInstance.current)
-      mapInstance.current.flyTo(MAP_CENTER, 13, { duration: 0.7 });
-  };
-
-  // Fly the map so every visible marker fits in the viewport. Single-
-  // item case zooms in instead of fitting a degenerate bounding box.
+  // Fly the map so every visible pin fits in the viewport. Single-
+  // pin case zooms in instead of fitting a degenerate bounding box.
   const handleFitAll = useCallback(() => {
     if (!mapInstance.current || !window.L) return;
-    const L = window.L;
-    const valid = visibleItems.filter(
-      (i) =>
-        Array.isArray(i.coords) &&
-        Number.isFinite(i.coords[0]) &&
-        Number.isFinite(i.coords[1]),
-    );
-    if (valid.length === 0) return;
-    if (valid.length === 1) {
-      mapInstance.current.flyTo(valid[0].coords, 15, { duration: 0.7 });
+    const points = [...visibleClues, ...visibleIntel].map((p) => p.coords);
+    if (points.length === 0) return;
+    if (points.length === 1) {
+      mapInstance.current.flyTo(points[0], 17, { duration: 0.7 });
       return;
     }
-    const bounds = L.latLngBounds(valid.map((i) => i.coords));
+    const bounds = window.L.latLngBounds(points);
     if (!bounds.isValid()) return;
     mapInstance.current.flyToBounds(bounds, {
-      padding: [60, 60],
-      maxZoom: 15,
+      padding: [70, 70],
+      maxZoom: 17,
       duration: 0.8,
     });
-  }, [visibleItems]);
+  }, [visibleClues, visibleIntel]);
 
-  // One-shot: when items first arrive, if none are inside the
-  // default NYC viewport, auto-fit so the user actually sees them.
+  // Campus is rarely at the default anchor, so refit when the first
+  // pins arrive, when a new clue unlocks, and when the filter flips —
+  // but not on every Wire post, which would yank the map around.
+  const fitKey = `${filter}|${visibleClues.map((p) => p.id).join(",")}|${visibleCount > 0}`;
   const didInitialFitRef = useRef(false);
   useEffect(() => {
-    if (didInitialFitRef.current) return;
-    if (!mapInstance.current || !window.L) return;
-    if (visibleItems.length === 0) return;
-    // Wait long enough for invalidateSize timers to settle so
-    // map.getBounds() reports the real viewport.
-    const t = setTimeout(() => {
-      if (didInitialFitRef.current || !mapInstance.current) return;
-      const L = window.L;
-      const map = mapInstance.current;
-      const valid = visibleItems.filter(
-        (i) =>
-          Array.isArray(i.coords) &&
-          Number.isFinite(i.coords[0]) &&
-          Number.isFinite(i.coords[1]),
-      );
-      if (valid.length === 0) return;
-      const view = map.getBounds();
-      const anyVisible = valid.some((i) => view.contains(L.latLng(i.coords)));
-      didInitialFitRef.current = true;
-      if (!anyVisible) {
-        if (valid.length === 1) {
-          map.flyTo(valid[0].coords, 14, { duration: 0.8 });
-        } else {
-          const b = L.latLngBounds(valid.map((i) => i.coords));
-          if (b.isValid()) {
-            map.flyToBounds(b, {
-              padding: [60, 60],
-              maxZoom: 14,
-              duration: 0.8,
-            });
-          }
-        }
-      }
-    }, 1100);
-    return () => clearTimeout(t);
-  }, [visibleItems]);
-
-  // When the filter changes (e.g. user clicks "Lost" and the new
-  // set is entirely off-screen), auto-fit too.
-  const prevFilterRef = useRef(filter);
-  useEffect(() => {
-    if (prevFilterRef.current === filter) return;
-    prevFilterRef.current = filter;
-    if (!mapInstance.current || !window.L) return;
-    const t = setTimeout(() => {
-      if (!mapInstance.current) return;
-      const L = window.L;
-      const map = mapInstance.current;
-      const valid = visibleItems.filter(
-        (i) =>
-          Array.isArray(i.coords) &&
-          Number.isFinite(i.coords[0]) &&
-          Number.isFinite(i.coords[1]),
-      );
-      if (valid.length === 0) return;
-      const view = map.getBounds();
-      const anyVisible = valid.some((i) => view.contains(L.latLng(i.coords)));
-      if (!anyVisible) handleFitAll();
-    }, 60);
+    if (!mapReady || visibleCount === 0) return;
+    const t = setTimeout(
+      () => {
+        didInitialFitRef.current = true;
+        handleFitAll();
+      },
+      didInitialFitRef.current ? 60 : 1100,
+    );
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filter]);
+  }, [fitKey, mapReady]);
+
+  // "View on map" from the vault or a Wire line: fly there, open it.
+  useEffect(() => {
+    if (!focus || !mapInstance.current) return;
+    const marker = markersById.current.get(focus.id);
+    if (!marker) return;
+    mapInstance.current.flyTo(marker.getLatLng(), 17, { duration: 0.8 });
+    marker.openPopup();
+  }, [focus]);
 
   const handleLocateMe = useCallback(() => {
     setLocError(null);
@@ -2201,2645 +1571,794 @@ function InteractiveMap({
     );
   }, []);
 
-  // Items within 2km of the user
-  const nearbyMeCount = useMemo(() => {
-    if (!userLocation || !window.L) return 0;
-    const L = window.L;
-    const me = L.latLng(userLocation.coords);
-    return itemsWithCoords.reduce(
-      (n, i) => n + (L.latLng(i.coords).distanceTo(me) <= 2000 ? 1 : 0),
-      0,
+  const openPin = cluePins.find((p) => p.status === "open") || null;
+
+  // Straight-line distance from the detective to the open file
+  const distanceToOpen = useMemo(() => {
+    if (!userLocation || !openPin || !window.L) return null;
+    return window.L.latLng(userLocation.coords).distanceTo(
+      window.L.latLng(openPin.coords),
     );
-  }, [itemsWithCoords, userLocation]);
+  }, [userLocation, openPin]);
 
-  return (
-    <section id="network-map" className="px-3 sm:px-6 lg:px-10 pt-6">
-      <div className="flex items-end justify-between mb-4 px-1 flex-wrap gap-3">
-        <div>
-          <div className="text-[10px] uppercase tracking-[0.22em] text-cyan-400 font-mono mb-1.5 flex items-center gap-2">
-            <span className="w-3 h-px bg-cyan-400" />
-            Centerpiece · Live Map
-          </div>
-          <h2 className="text-2xl sm:text-3xl lg:text-4xl font-semibold tracking-tight">
-            <span className="tn-gradient-text">Recovery Network</span>{" "}
-            <span className="text-slate-100">Map</span>
-          </h2>
-          <p className="text-sm text-slate-400 mt-1">
-            Click a pin to reveal its proximity radius and nearby items in the
-            network.
-          </p>
-        </div>
-        <div className="flex items-center gap-2 text-xs flex-wrap">
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/[0.03] border border-white/[0.06]">
-            <span className="w-2 h-2 rounded-full bg-rose-400 shadow-[0_0_8px_rgba(251,113,133,0.7)]" />
-            <span className="text-slate-300 font-mono">Lost · {lostCount}</span>
-          </div>
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/[0.03] border border-white/[0.06]">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.7)]" />
-            <span className="text-slate-300 font-mono">
-              Found · {foundCount}
-            </span>
-          </div>
-          {recoveredCount > 0 && (
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-amber-400/[0.10] border border-amber-400/40 shadow-[0_0_12px_rgba(251,191,36,0.18)]">
-              <span className="relative flex w-2 h-2">
-                <span className="absolute inset-0 rounded-full bg-amber-300 animate-ping opacity-70" />
-                <span className="relative w-2 h-2 rounded-full bg-amber-400 shadow-[0_0_10px_rgba(251,191,36,0.8)]" />
-              </span>
-              <span className="text-amber-200 font-mono">
-                Recovered · {recoveredCount}
-              </span>
-            </div>
-          )}
-        </div>
-      </div>
-
-      <div className="relative tn-glass rounded-3xl overflow-hidden">
-        {/*
-          Sizing is provided by .tn-map-canvas in styles.css with
-          explicit pixel min-heights so the map has a guaranteed
-          height even before Tailwind's CDN JIT finishes applying
-          its arbitrary-value classes.
-        */}
-        <div ref={mapEl} className="tn-map-canvas" />
-
-        <div className="pointer-events-none absolute inset-0 rounded-3xl tn-grad-border opacity-70 z-[400]" />
-
-        {/* Top-left: live counter */}
-        <div className="pointer-events-none absolute top-4 left-4 z-[400] px-3 py-1.5 rounded-lg bg-black/60 backdrop-blur border border-white/[0.08] text-[10px] font-mono uppercase tracking-wider text-slate-300 flex items-center gap-2">
-          <span className="relative flex w-1.5 h-1.5">
-            <span className="absolute inset-0 rounded-full bg-cyan-400 animate-ping opacity-70" />
-            <span className="relative w-1.5 h-1.5 rounded-full bg-cyan-400" />
-          </span>
-          {visibleItems.length} pins · live
-        </div>
-
-        {/* Top-right: filter pills */}
-        <div className="absolute top-4 right-4 z-[400] flex p-1 rounded-xl bg-black/60 backdrop-blur border border-white/[0.08] text-[11px] font-mono">
-          {[
-            { k: "all", label: "All" },
-            { k: "lost", label: "Lost", c: "rose" },
-            { k: "found", label: "Found", c: "emerald" },
-            { k: "recovered", label: "Recovered", c: "amber" },
-          ].map((o) => (
-            <button
-              key={o.k}
-              onClick={() => {
-                setSelectedId(null);
-                setCardItem(null);
-                setFilter(o.k);
-              }}
-              className={cn(
-                "px-3 py-1.5 rounded-lg transition-all uppercase tracking-wider flex items-center gap-1.5",
-                filter === o.k
-                  ? o.c === "amber"
-                    ? "bg-amber-400/25 text-amber-100 border border-amber-400/45 shadow-[0_0_14px_rgba(251,191,36,0.3)]"
-                    : o.c === "rose"
-                      ? "bg-rose-400/20 text-rose-100 border border-rose-400/40 shadow-[0_0_14px_rgba(251,113,133,0.25)]"
-                      : o.c === "emerald"
-                        ? "bg-emerald-400/20 text-emerald-100 border border-emerald-400/40 shadow-[0_0_14px_rgba(52,211,153,0.25)]"
-                        : "bg-gradient-to-br from-cyan-500/30 to-purple-500/30 text-white border border-white/[0.12] shadow-[0_0_14px_rgba(34,211,238,0.25)]"
-                  : "text-slate-400 hover:text-slate-200",
-              )}
-            >
-              {o.label}
-              {o.k === "recovered" && recoveredCount > 0 && (
-                <span className="text-[9px] tabular-nums opacity-80">
-                  {recoveredCount}
-                </span>
-              )}
-            </button>
-          ))}
-        </div>
-
-        {/* Bottom-left: locate-me + scroll-zoom toggle + reset */}
-        <div className="absolute bottom-4 left-4 z-[400] flex items-center gap-2 flex-wrap max-w-[calc(100%-2rem)]">
-          <button
-            onClick={handleLocateMe}
-            disabled={locating}
-            className={cn(
-              "px-3 py-1.5 rounded-lg backdrop-blur border text-[10px] font-mono uppercase tracking-wider transition-colors flex items-center gap-1.5 disabled:opacity-70",
-              userLocation
-                ? "bg-cyan-400/20 border-cyan-400/45 text-cyan-200 shadow-[0_0_12px_rgba(34,211,238,0.3)]"
-                : "bg-black/60 border-white/[0.08] text-slate-300 hover:text-white",
-            )}
-            title="Center map on your location"
-          >
-            {locating ? (
-              <>
-                <span className="w-2.5 h-2.5 rounded-full border-2 border-cyan-400/30 border-t-cyan-400 animate-spin" />
-                locating…
-              </>
-            ) : userLocation ? (
-              <>📍 you · centered</>
-            ) : (
-              <>📍 locate me</>
-            )}
-          </button>
-          <button
-            onClick={handleFitAll}
-            disabled={visibleItems.length === 0}
-            className="px-3 py-1.5 rounded-lg bg-black/60 backdrop-blur border border-white/[0.08] text-[10px] font-mono uppercase tracking-wider text-slate-300 hover:text-white hover:border-purple-400/40 transition-colors flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
-            title="Zoom & pan to fit every visible pin"
-          >
-            ⛶ fit all
-            {visibleItems.length > 0 && (
-              <span className="text-[9px] tabular-nums opacity-70">
-                {visibleItems.length}
-              </span>
-            )}
-          </button>
-          <button
-            onClick={() => setScrollZoom((s) => !s)}
-            className={cn(
-              "px-3 py-1.5 rounded-lg backdrop-blur border text-[10px] font-mono uppercase tracking-wider transition-colors",
-              scrollZoom
-                ? "bg-cyan-400/20 border-cyan-400/45 text-cyan-200 shadow-[0_0_12px_rgba(34,211,238,0.25)]"
-                : "bg-black/60 border-white/[0.08] text-slate-300 hover:text-white",
-            )}
-            title="Toggle scroll-wheel zoom"
-          >
-            scroll-zoom · {scrollZoom ? "on" : "off"}
-          </button>
-          {(selectedId || filter !== "all" || userLocation || cardItem) && (
-            <button
-              onClick={() => {
-                setUserLocation(null);
-                setLocError(null);
-                setCardItem(null);
-                handleReset();
-              }}
-              className="px-3 py-1.5 rounded-lg bg-black/60 backdrop-blur border border-white/[0.08] text-[10px] font-mono uppercase tracking-wider text-slate-300 hover:text-white transition-colors"
-            >
-              ↺ reset
-            </button>
-          )}
-        </div>
-
-        {/* Geolocation error toast */}
-        <AnimatePresence>
-          {locError && (
-            <motion.div
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 8 }}
-              className="absolute bottom-16 left-4 z-[420] px-3 py-2 rounded-lg bg-rose-500/15 backdrop-blur border border-rose-500/40 text-[11px] font-mono text-rose-200 max-w-[260px]"
-            >
-              {locError}
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* Bottom-right: hint / selected info / nearby-me count */}
-        <AnimatePresence mode="wait">
-          {selectedItem ? (
-            <motion.div
-              key="selected"
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 8 }}
-              transition={{ duration: 0.25 }}
-              className="absolute bottom-4 right-4 z-[400] max-w-[260px] px-3 py-2 rounded-xl bg-black/65 backdrop-blur border border-white/[0.08] text-xs"
-            >
-              <div className="text-[10px] uppercase tracking-[0.18em] text-cyan-300 font-mono mb-0.5">
-                Tracking · 1km radius
-              </div>
-              <div className="text-slate-100 font-medium truncate">
-                {selectedItem.itemOriginal || selectedItem.item || "—"}
-              </div>
-              <div className="text-slate-400 truncate font-mono text-[11px] mt-0.5">
-                {selectedItem.locationOriginal || selectedItem.location || "—"}
-              </div>
-            </motion.div>
-          ) : userLocation ? (
-            <motion.div
-              key="nearby-me"
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 8 }}
-              transition={{ duration: 0.25 }}
-              className="absolute bottom-4 right-4 z-[400] max-w-[260px] px-3 py-2 rounded-xl bg-black/65 backdrop-blur border border-cyan-400/35 text-xs shadow-[0_0_14px_rgba(34,211,238,0.18)]"
-            >
-              <div className="text-[10px] uppercase tracking-[0.18em] text-cyan-300 font-mono mb-0.5 flex items-center gap-1.5">
-                <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
-                Near you · 2km radius
-              </div>
-              <div className="text-slate-100 font-medium">
-                {nearbyMeCount} {nearbyMeCount === 1 ? "item" : "items"} within
-                range
-              </div>
-              <div className="text-slate-400 font-mono text-[11px] mt-0.5">
-                {userLocation.coords[0].toFixed(3)}°,{" "}
-                {userLocation.coords[1].toFixed(3)}°
-              </div>
-            </motion.div>
-          ) : (
-            <motion.div
-              key="hint"
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 8 }}
-              transition={{ duration: 0.25 }}
-              className="hidden sm:block absolute bottom-4 right-4 z-[400] px-3 py-1.5 rounded-lg bg-black/60 backdrop-blur border border-white/[0.08] text-[10px] font-mono uppercase tracking-wider text-slate-400"
-            >
-              tap a pin → see nearby items
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* Empty state overlay */}
-        {visibleItems.length === 0 && (
-          <div className="absolute inset-0 z-[450] flex items-center justify-center pointer-events-none">
-            <div className="px-5 py-3 rounded-xl bg-black/65 backdrop-blur border border-white/[0.08] text-center">
-              <div className="text-sm text-slate-200 font-medium">
-                No pings on the map
-              </div>
-              <div className="text-xs text-slate-500 mt-0.5 font-mono">
-                {filter === "all"
-                  ? "report an item to populate the network"
-                  : `no ${filter} reports yet`}
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Rich React popup card — fixed-position, lives outside the map div */}
-      <AnimatePresence mode="wait">
-        {cardItem && (
-          <MarkerCard
-            key={cardItem.id}
-            item={cardItem}
-            allItems={items}
-            userLocation={userLocation}
-            currentUser={currentUser}
-            myClaim={
-              currentUser
-                ? claims.find(
-                    (c) =>
-                      c.itemId === cardItem.id &&
-                      c.claimantUid === currentUser.uid,
-                  )
-                : null
-            }
-            claimBusy={claimBusy}
-            onClaim={onClaim}
-            onOpenChat={onOpenChat}
-            onRequireSignIn={onRequireSignIn}
-            onClose={() => {
-              setCardItem(null);
-              setSelectedId(null);
-            }}
-          />
-        )}
-      </AnimatePresence>
-    </section>
-  );
-}
-
-/* ================== SMART MATCH CARDS ================== */
-
-function AdvancedMatchCard({ match, idx }) {
-  const { lost, found, score, imgSim, distance, fraud, trust } = match;
-  const pct = Math.round(score * 100);
-  const imgPct = imgSim != null ? Math.round(imgSim * 100) : null;
-  const distLabel = formatDistance(distance);
-  const fraudColor =
-    fraud.level === "high"
-      ? "#fb7185"
-      : fraud.level === "medium"
-        ? "#fbbf24"
-        : "#34d399";
-  const trustColor =
-    trust >= 70 ? "#34d399" : trust >= 45 ? "#fbbf24" : "#94a3b8";
-  const gradId = `mg-${lost.id}-${found.id}`;
-
-  // Highlight strongest signal in the summary line
-  const summary = [
-    `${pct}% Match`,
-    imgPct != null ? `${imgPct}% Image` : null,
-    distLabel ? distLabel : null,
-    `${fraud.level === "low" ? "Low" : fraud.level === "medium" ? "Med" : "High"} Risk`,
-  ]
-    .filter(Boolean)
-    .join(" • ");
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 12 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ delay: idx * 0.06, duration: 0.4 }}
-      className="tn-match-card relative tn-glass rounded-2xl p-4 hover:border-purple-400/40 transition-colors"
-    >
-      {/* Top row: thumbs + confidence gauge */}
-      <div className="flex items-center gap-3 mb-3">
-        <div className="flex items-center gap-2 min-w-0 flex-1">
-          <MatchThumb item={lost} role="lost" />
-          <span className="tn-match-arrow">↔</span>
-          <MatchThumb item={found} role="found" />
-          <div className="ml-2 min-w-0 hidden sm:block">
-            <div className="text-[10px] uppercase tracking-[0.18em] font-mono text-slate-500">
-              {lost.category || "—"} → {found.category || "—"}
-            </div>
-            <div className="text-sm font-semibold text-slate-100 truncate">
-              {found.itemOriginal || found.item || "Untitled"}
-            </div>
-          </div>
-        </div>
-
-        <div className="relative w-14 h-14 shrink-0">
-          <svg className="w-14 h-14 -rotate-90" viewBox="0 0 36 36">
-            <circle
-              cx="18"
-              cy="18"
-              r="16"
-              fill="none"
-              stroke="rgba(255,255,255,0.06)"
-              strokeWidth="3"
-            />
-            <circle
-              cx="18"
-              cy="18"
-              r="16"
-              fill="none"
-              stroke={`url(#${gradId})`}
-              strokeWidth="3"
-              strokeDasharray={`${(score * 100.53).toFixed(2)} 100.53`}
-              strokeLinecap="round"
-            />
-            <defs>
-              <linearGradient id={gradId} x1="0" y1="0" x2="1" y2="1">
-                <stop offset="0%" stopColor="#22d3ee" />
-                <stop offset="100%" stopColor="#a855f7" />
-              </linearGradient>
-            </defs>
-          </svg>
-          <div className="absolute inset-0 flex flex-col items-center justify-center">
-            <span className="text-[13px] font-mono font-bold tabular-nums text-slate-100 leading-none">
-              {pct}%
-            </span>
-            <span className="text-[8px] font-mono text-purple-300 mt-0.5 uppercase tracking-[0.12em]">
-              match
-            </span>
-          </div>
-        </div>
-      </div>
-
-      {/* Side-by-side details */}
-      <div className="grid grid-cols-2 gap-2 text-xs mb-3">
-        <div className="rounded-lg bg-rose-400/[0.05] border border-rose-400/15 p-2.5">
-          <div className="text-[10px] uppercase tracking-[0.16em] text-rose-300 font-mono mb-1">
-            Lost
-          </div>
-          <div className="font-medium text-slate-100 truncate">
-            {lost.itemOriginal || lost.item}
-          </div>
-          <div className="text-slate-400 truncate flex items-center gap-1 mt-0.5 text-[11px]">
-            <Icon.Pin />
-            {lost.locationOriginal || lost.location || "—"}
-          </div>
-        </div>
-        <div className="rounded-lg bg-emerald-400/[0.05] border border-emerald-400/15 p-2.5">
-          <div className="text-[10px] uppercase tracking-[0.16em] text-emerald-300 font-mono mb-1">
-            Found
-          </div>
-          <div className="font-medium text-slate-100 truncate">
-            {found.itemOriginal || found.item}
-          </div>
-          <div className="text-slate-400 truncate flex items-center gap-1 mt-0.5 text-[11px]">
-            <Icon.Pin />
-            {found.locationOriginal || found.location || "—"}
-          </div>
-        </div>
-      </div>
-
-      {/* Stats badges */}
-      <div className="flex flex-wrap items-center gap-1.5 mb-2">
-        {imgPct != null && (
-          <span
-            className="tn-match-stat"
-            style={{
-              "--c":
-                imgPct >= 70 ? "#a855f7" : imgPct >= 40 ? "#22d3ee" : "#94a3b8",
-            }}
-            title="Visual similarity from dHash + colour histogram"
-          >
-            <Icon.Sparkles />
-            {imgPct}% img
-          </span>
-        )}
-        {distLabel && (
-          <span className="tn-match-stat" style={{ "--c": "#22d3ee" }}>
-            <Icon.Pin />
-            {distLabel}
-          </span>
-        )}
-        <span
-          className="tn-match-stat"
-          style={{ "--c": trustColor }}
-          title="Average trust score across both posts"
-        >
-          <Icon.Shield />
-          Trust {trust}
-        </span>
-        <span
-          className="tn-match-stat"
-          style={{ "--c": fraudColor }}
-          title={fraud.reasons.join(" · ") || "No anomalies detected"}
-        >
-          <Icon.Alert />
-          {fraud.level === "low"
-            ? "Low risk"
-            : fraud.level === "medium"
-              ? "Medium risk"
-              : "High risk"}
-        </span>
-      </div>
-
-      {/* Summary line */}
-      <div className="text-[11px] font-mono text-slate-400 italic">
-        “{summary}”
-      </div>
-    </motion.div>
-  );
-}
-
-function MatchThumb({ item, role }) {
-  const accent = role === "lost" ? "#fb7185" : "#34d399";
   return (
     <div
-      className="tn-match-thumb"
-      style={{ "--c": accent }}
-      title={item.itemOriginal || item.item || ""}
+      id="hunt-map"
+      className={cn(
+        "tn-panel tn-rise lg:col-span-2 scroll-mt-24",
+        picking && "tn-map-picking",
+      )}
     >
-      {item.photoData ? (
-        <img src={item.photoData} alt="" />
-      ) : (
-        <div className="tn-match-thumb-empty">
-          <span>{CAT_GLYPH[item.category] || "📦"}</span>
+      {/*
+        Sizing is provided by .tn-map-canvas in styles.css with
+        explicit pixel heights so the map has a guaranteed height
+        even before Tailwind's CDN JIT finishes applying its classes.
+      */}
+      <div ref={mapEl} className="tn-map-canvas" />
+
+      {/* Top-left: live counter */}
+      <div className="tn-hud pointer-events-none absolute top-3 left-3 z-[400] flex items-center gap-2">
+        <span className="tn-dot" />
+        {cluePins.length} files · {intelPins.length} intel
+      </div>
+
+      {/* Top-right: source filter */}
+      <div className="absolute top-3 right-3 z-[400] flex gap-1">
+        {[
+          { k: "all", label: "All" },
+          { k: "clues", label: "Files" },
+          { k: "intel", label: "Intel" },
+        ].map((o) => (
+          <button
+            key={o.k}
+            onClick={() => setFilter(o.k)}
+            className={cn("tn-hud", filter === o.k && "tn-hud-on")}
+          >
+            {o.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Pin-drop banner */}
+      <AnimatePresence>
+        {picking && (
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            className="tn-hud pointer-events-none absolute top-14 inset-x-0 mx-auto w-fit z-[420] !border-ch-warn !text-ch-warn whitespace-nowrap"
+          >
+            click the map to drop your pin · esc to cancel
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Bottom-left: locate-me + fit + scroll-zoom toggle */}
+      <div className="absolute bottom-6 left-3 z-[400] flex items-center gap-1 flex-wrap max-w-[calc(100%-1.5rem)]">
+        <button
+          onClick={handleLocateMe}
+          disabled={locating}
+          className={cn("tn-hud", userLocation && "tn-hud-on")}
+          title="Center map on your location"
+        >
+          {locating ? "locating…" : userLocation ? "you · locked" : "locate me"}
+        </button>
+        <button
+          onClick={handleFitAll}
+          disabled={visibleCount === 0}
+          className="tn-hud"
+          title="Zoom & pan to fit every visible pin"
+        >
+          fit all
+        </button>
+        <button
+          onClick={() => setScrollZoom((s) => !s)}
+          className={cn("tn-hud", scrollZoom && "tn-hud-on")}
+          title="Toggle scroll-wheel zoom"
+        >
+          scroll-zoom · {scrollZoom ? "on" : "off"}
+        </button>
+      </div>
+
+      {/* Geolocation error toast */}
+      <AnimatePresence>
+        {locError && (
+          <motion.div
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 8 }}
+            className="tn-hud absolute bottom-16 left-3 z-[420] !border-ch-danger !text-ch-danger max-w-[260px]"
+          >
+            {locError}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Bottom-right: distance to the open file */}
+      {distanceToOpen != null && (
+        <div className="tn-hud tn-hud-on absolute bottom-6 right-3 z-[400] max-w-[240px]">
+          target · {formatDistance(distanceToOpen)} out
         </div>
       )}
-      <div className="tn-match-thumb-tag">
-        {role === "lost" ? "LOST" : "FOUND"}
-      </div>
+
+      {/* Empty state overlay */}
+      {visibleCount === 0 && !picking && (
+        <div className="absolute inset-0 z-[450] flex items-center justify-center pointer-events-none">
+          <div className="tn-hud text-center !px-5 !py-3">
+            <div className="text-white">no signals on the map</div>
+            <div className="text-ch-mute mt-1 normal-case tracking-normal">
+              {filter === "intel" ? "no pinned intel on the wire yet" : emptyHint}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-function SmartMatchCards({ items }) {
-  const { fingerprints, computing } = useImageFingerprints(items);
-  const matches = useMemo(
-    () => findAdvancedMatches(items, fingerprints, 4),
-    [items, fingerprints],
-  );
+/* ================== THE WIRE (LIVE INTEL FEED) ================== */
 
-  const totalPhotos = items.filter((i) => i.photoData).length;
-  const fingerprinted = Object.keys(fingerprints).length;
-
-  return (
-    <section>
-      <div className="mb-4 px-1 flex items-end justify-between gap-3 flex-wrap">
-        <div>
-          <div className="text-[10px] uppercase tracking-[0.22em] text-purple-400 font-mono mb-1.5 flex items-center gap-2">
-            <span className="w-3 h-px bg-purple-400" />
-            AI Matching · v2
-          </div>
-          <h2 className="text-xl sm:text-2xl font-semibold tracking-tight flex items-center gap-2">
-            <span className="text-purple-300">
-              <Icon.Brain />
-            </span>
-            Smart Match Engine
-          </h2>
-          <p className="text-sm text-slate-400 mt-1">
-            Title · description · category · proximity · image similarity.
-          </p>
-        </div>
-        <div
-          className={cn(
-            "px-3 py-1.5 rounded-full bg-white/[0.03] border border-white/[0.06] text-[10px] font-mono uppercase tracking-wider flex items-center gap-2",
-            computing ? "text-purple-200" : "text-slate-400",
-          )}
-          title={`${fingerprinted}/${totalPhotos} photos fingerprinted`}
-        >
-          {computing ? (
-            <span className="w-2.5 h-2.5 rounded-full border-2 border-purple-400/30 border-t-purple-400 animate-spin" />
-          ) : (
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.7)]" />
-          )}
-          {computing
-            ? "Scanning images…"
-            : `${fingerprinted}/${totalPhotos} fingerprinted`}
-        </div>
-      </div>
-
-      <div className="space-y-3">
-        {matches.length === 0 ? (
-          <div className="tn-glass rounded-2xl p-8 text-center">
-            <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-white/[0.03] border border-white/[0.06] mb-3 text-slate-500">
-              <Icon.Sparkles />
-            </div>
-            <p className="text-slate-300 text-sm font-medium">
-              Awaiting more signals
-            </p>
-            <p className="text-slate-500 text-xs mt-1">
-              Matches surface here once a Lost and a Found item share enough
-              signals.
-            </p>
-          </div>
-        ) : (
-          matches.map((m, idx) => (
-            <AdvancedMatchCard
-              key={`${m.lost.id}-${m.found.id}`}
-              match={m}
-              idx={idx}
-            />
-          ))
-        )}
-      </div>
-    </section>
-  );
+function formatClock(ts) {
+  const ms = tsToMillis(ts);
+  if (!ms) return "--:--:--";
+  return new Date(ms).toLocaleTimeString("en-GB", { hour12: false });
 }
 
-/* ================== FRAUD ALERTS ================== */
+function TheWire({
+  intel,
+  user,
+  team,
+  draftPin,
+  picking,
+  onTogglePick,
+  onClearPin,
+  onSignIn,
+  onFocusPin,
+}) {
+  const feedRef = useRef(null);
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [cooling, setCooling] = useState(false);
+  const [err, setErr] = useState("");
 
-const SEV = {
-  high: { color: "#fb7185", label: "HIGH" },
-  medium: { color: "#fbbf24", label: "MED" },
-  low: { color: "#94a3b8", label: "LOW" },
-};
+  // Terminal behaviour: stick to the newest line
+  useEffect(() => {
+    const el = feedRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [intel.length]);
 
-function FraudAlertsPanel({ items }) {
-  const alerts = useMemo(() => detectFraud(items), [items]);
+  const coolTimer = useRef(0);
+  useEffect(() => () => clearTimeout(coolTimer.current), []);
 
-  return (
-    <section>
-      <div className="mb-4 px-1 flex items-end justify-between gap-3 flex-wrap">
-        <div>
-          <div className="text-[10px] uppercase tracking-[0.22em] text-rose-400 font-mono mb-1.5 flex items-center gap-2">
-            <span className="w-3 h-px bg-rose-400" />
-            Section 03 · Anomaly Detection
-          </div>
-          <h2 className="text-xl sm:text-2xl font-semibold tracking-tight flex items-center gap-2">
-            <span className="text-rose-300">
-              <Icon.Shield />
-            </span>
-            Fraud Alert Stream
-          </h2>
-          <p className="text-sm text-slate-400 mt-1">
-            Heuristic anomalies flagged across the network.
-          </p>
-        </div>
-        <div className="flex items-center gap-2 text-xs px-3 py-1.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
-          <span className="relative flex w-2 h-2">
-            <span
-              className={cn(
-                "absolute inset-0 rounded-full opacity-60",
-                alerts.length ? "bg-rose-400 animate-ping" : "bg-emerald-400",
-              )}
-            />
-            <span
-              className={cn(
-                "relative w-2 h-2 rounded-full",
-                alerts.length ? "bg-rose-400" : "bg-emerald-400",
-              )}
-            />
-          </span>
-          <span className="text-slate-300 font-mono">
-            {alerts.length} active
-          </span>
-        </div>
-      </div>
-
-      <div className="tn-glass rounded-2xl overflow-hidden">
-        {alerts.length === 0 ? (
-          <div className="p-8 text-center">
-            <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-emerald-400/[0.06] border border-emerald-400/20 mb-3 text-emerald-400">
-              <Icon.Shield />
-            </div>
-            <p className="text-slate-200 text-sm font-medium">All clear</p>
-            <p className="text-slate-500 text-xs mt-1">
-              No anomalies detected in current dataset.
-            </p>
-          </div>
-        ) : (
-          <ul className="divide-y divide-white/[0.05]">
-            {alerts.map((a, idx) => {
-              const sev = SEV[a.severity];
-              return (
-                <motion.li
-                  key={`${a.item?.id || "?"}-${a.type}-${idx}`}
-                  initial={{ opacity: 0, x: 16 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: idx * 0.05 }}
-                  className="px-4 py-3 flex items-start gap-3 hover:bg-white/[0.02] transition-colors"
-                >
-                  <div
-                    className="shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold tracking-[0.12em]"
-                    style={{
-                      backgroundColor: `${sev.color}1f`,
-                      color: sev.color,
-                      border: `1px solid ${sev.color}40`,
-                      boxShadow:
-                        a.severity !== "low"
-                          ? `0 0 10px ${sev.color}30`
-                          : "none",
-                    }}
-                  >
-                    {sev.label}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium text-slate-200">
-                      {a.type}
-                    </div>
-                    <div className="text-xs text-slate-400 mt-0.5">
-                      {a.reason}
-                    </div>
-                    {a.item && (
-                      <div className="text-[11px] text-slate-500 mt-1 font-mono truncate">
-                        → {a.item.itemOriginal || a.item.item || "—"}
-                        {a.item.email ? ` · ${a.item.email}` : ""}
-                      </div>
-                    )}
-                  </div>
-                </motion.li>
-              );
-            })}
-          </ul>
-        )}
-      </div>
-    </section>
-  );
-}
-
-/* ================== ANALYTICS DASHBOARD ================== */
-
-function AnalyticsDashboard({ items }) {
-  const byCategory = useMemo(() => {
-    const m = new Map(CATEGORIES.map((c) => [c, 0]));
-    items.forEach((i) => {
-      const c = CATEGORIES.includes(i.category) ? i.category : "Other";
-      m.set(c, (m.get(c) || 0) + 1);
-    });
-    return Array.from(m.entries()).map(([name, count]) => ({ name, count }));
-  }, [items]);
-
-  const maxCat = Math.max(1, ...byCategory.map((c) => c.count));
-
-  const last7 = useMemo(() => {
-    const days = [];
-    const now = new Date();
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date(now);
-      d.setDate(d.getDate() - i);
-      const key = d.toISOString().slice(0, 10);
-      days.push({
-        key,
-        label: d.toLocaleDateString("en-US", { weekday: "short" }),
-        count: 0,
-      });
+  const transmit = async (e) => {
+    e.preventDefault();
+    if (busy || cooling || !message.trim()) return;
+    setErr("");
+    setBusy(true);
+    try {
+      await postIntel({ team, message, coords: draftPin });
+      setMessage("");
+      onClearPin();
+      setCooling(true);
+      coolTimer.current = setTimeout(
+        () => setCooling(false),
+        INTEL_COOLDOWN_MS,
+      );
+    } catch (e2) {
+      setErr(e2.message || "Transmission failed.");
+    } finally {
+      setBusy(false);
     }
-    items.forEach((i) => {
-      if (!i.date) return;
-      const found = days.find((d) => d.key === i.date);
-      if (found) found.count++;
-    });
-    return days;
-  }, [items]);
-
-  const maxDay = Math.max(1, ...last7.map((d) => d.count));
+  };
 
   return (
-    <section className="px-3 sm:px-6 lg:px-10 pt-8">
-      <div className="mb-4 px-1">
-        <div className="text-[10px] uppercase tracking-[0.22em] text-emerald-400 font-mono mb-1.5 flex items-center gap-2">
-          <span className="w-3 h-px bg-emerald-400" />
-          Section 04 · Analytics
-        </div>
-        <h2 className="text-2xl sm:text-3xl font-semibold tracking-tight">
-          Network Pulse
-        </h2>
-        <p className="text-sm text-slate-400 mt-1">
-          Real-time decomposition of activity across the recovery graph.
-        </p>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-3 sm:gap-4">
-        <div className="lg:col-span-3 tn-glass rounded-2xl p-5">
-          <div className="flex items-center justify-between mb-4">
-            <div className="text-sm font-medium text-slate-200">
-              Items by Category
-            </div>
-            <div className="text-[10px] text-slate-500 font-mono uppercase tracking-wider">
-              total · {items.length}
-            </div>
-          </div>
-          <div className="space-y-3">
-            {byCategory.map((c, i) => (
-              <div key={c.name}>
-                <div className="flex items-center justify-between text-xs mb-1.5">
-                  <span className="text-slate-300 flex items-center gap-2">
-                    <span
-                      className="w-2 h-2 rounded-full"
-                      style={{
-                        backgroundColor: CAT_COLORS[c.name],
-                        boxShadow: `0 0 8px ${CAT_COLORS[c.name]}80`,
-                      }}
-                    />
-                    {c.name}
-                  </span>
-                  <span className="text-slate-500 font-mono tabular-nums">
-                    {c.count}
-                  </span>
-                </div>
-                <div className="h-2 rounded-full bg-white/[0.03] overflow-hidden">
-                  <motion.div
-                    initial={{ width: 0 }}
-                    animate={{ width: `${(c.count / maxCat) * 100}%` }}
-                    transition={{
-                      duration: 0.9,
-                      delay: i * 0.1,
-                      ease: [0.16, 1, 0.3, 1],
-                    }}
-                    className="h-full rounded-full"
-                    style={{
-                      background: `linear-gradient(90deg, ${CAT_COLORS[c.name]}55, ${CAT_COLORS[c.name]})`,
-                      boxShadow: `0 0 12px ${CAT_COLORS[c.name]}50`,
-                    }}
-                  />
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div className="lg:col-span-2 tn-glass rounded-2xl p-5">
-          <div className="flex items-center justify-between mb-4">
-            <div className="text-sm font-medium text-slate-200">
-              Last 7 Days
-            </div>
-            <div className="text-[10px] text-slate-500 font-mono uppercase tracking-wider">
-              activity
-            </div>
-          </div>
-          <div className="h-32 flex items-end gap-2">
-            {last7.map((d, i) => {
-              const pct = (d.count / maxDay) * 100;
-              return (
-                <div
-                  key={d.key}
-                  className="flex-1 flex flex-col items-stretch h-full"
-                >
-                  <div className="flex-1 flex items-end">
-                    <motion.div
-                      initial={{ height: 0 }}
-                      animate={{ height: `${Math.max(pct, d.count ? 4 : 1)}%` }}
-                      transition={{
-                        duration: 0.8,
-                        delay: i * 0.06,
-                        ease: [0.16, 1, 0.3, 1],
-                      }}
-                      className="w-full rounded-t-md"
-                      style={{
-                        background: d.count
-                          ? "linear-gradient(180deg, #67e8f9, rgba(34,211,238,0.18))"
-                          : "rgba(255,255,255,0.04)",
-                        boxShadow: d.count
-                          ? "0 0 12px rgba(34,211,238,0.25)"
-                          : "none",
-                      }}
-                      title={`${d.count} on ${d.key}`}
-                    />
-                  </div>
-                  <div className="text-[10px] text-slate-500 font-mono text-center mt-1.5">
-                    {d.label}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-/* ================== ITEM CARD + GRID ================== */
-
-function ItemCard({ item, currentUser, onContact, onDelete, idx }) {
-  const isLost = item.type === "lost";
-  return (
-    <motion.article
-      layout
-      initial={{ opacity: 0, y: 18 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -10 }}
-      transition={{ duration: 0.45, delay: Math.min(idx, 8) * 0.04 }}
-      whileHover={{ y: -4 }}
-      className="group relative tn-glass rounded-2xl overflow-hidden hover:border-cyan-400/30 transition-all"
-    >
-      <div className="relative h-44 overflow-hidden">
-        {item.photoData ? (
-          <img
-            src={item.photoData}
-            alt={item.itemOriginal || item.item || ""}
-            className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-[1.04]"
-          />
-        ) : (
-          <div
-            className="w-full h-full flex items-center justify-center"
-            style={{
-              background: `linear-gradient(135deg, ${CAT_COLORS[item.category] || "#475569"}30, ${CAT_COLORS[item.category] || "#475569"}05)`,
-            }}
-          >
-            <div className="text-5xl opacity-40">
-              {CAT_GLYPH[item.category] || "📦"}
-            </div>
-          </div>
-        )}
-        <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/15 to-transparent" />
-        <div className="absolute top-3 left-3 flex items-center gap-2">
-          <span
-            className={cn(
-              "px-2 py-1 rounded-md text-[10px] font-mono font-bold uppercase tracking-[0.12em]",
-              isLost
-                ? "bg-rose-400/20 text-rose-300 border border-rose-400/35 shadow-[0_0_10px_rgba(251,113,133,0.25)]"
-                : "bg-emerald-400/20 text-emerald-300 border border-emerald-400/35 shadow-[0_0_10px_rgba(52,211,153,0.25)]",
-            )}
-          >
-            {item.type || "—"}
+    <Tilt max={2} className="tn-panel tn-wire tn-rise">
+      <div className="tn-wire-bar">
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="tn-dot" />
+          <span className="text-xs font-semibold tracking-[0.16em] uppercase text-white truncate">
+            The Wire
           </span>
-          {item.matched && (
-            <span className="px-2 py-1 rounded-md text-[10px] font-mono font-bold uppercase tracking-[0.12em] bg-purple-400/20 text-purple-300 border border-purple-400/35">
-              matched
-            </span>
-          )}
+          <span className="tn-label hidden sm:inline">intel_feed</span>
         </div>
-        {item.category && (
-          <div className="absolute top-3 right-3">
-            <span className="px-2 py-1 rounded-md text-[10px] font-mono uppercase tracking-[0.12em] bg-black/45 backdrop-blur text-slate-200 border border-white/[0.08]">
-              {item.category}
+        <span className="tn-label">{intel.length} tx</span>
+      </div>
+
+      <div ref={feedRef} className="tn-wire-feed">
+        <span className="tn-wire-line tn-wire-sys">
+          // uplink established · channel open to all agencies
+        </span>
+        <span className="tn-wire-line tn-wire-sys">
+          // intel is unverified. pins may be bluffs. trust no one.
+        </span>
+        {intel.map((post) => {
+          const mine = team && post.teamName === team.teamName;
+          const body = (
+            <>
+              <span className="tn-wire-time">[{formatClock(post.timestamp)}]</span>{" "}
+              <span className="tn-wire-team">{post.teamName || "unknown"}</span>
+              <span className="tn-wire-time"> &gt; </span>
+              {post.message}
+              {post.coords && <span className="tn-wire-pin"> ◆ pin</span>}
+            </>
+          );
+          const cls = cn("tn-wire-line", mine && "tn-wire-line-mine");
+          return post.coords ? (
+            <button
+              key={post.id}
+              type="button"
+              className={cls}
+              title="Show this pin on the map"
+              onClick={() => onFocusPin(`intel:${post.id}`)}
+            >
+              {body}
+            </button>
+          ) : (
+            <span key={post.id} className={cls}>
+              {body}
             </span>
-          </div>
+          );
+        })}
+        {intel.length === 0 && (
+          <span className="tn-wire-line tn-wire-sys">
+            // channel silent. be the first to transmit.
+          </span>
         )}
       </div>
 
-      <div className="p-4">
-        <h3 className="font-semibold text-base mb-2 leading-tight tn-line-clamp-1 text-slate-50">
-          {item.itemOriginal || item.item || "Untitled"}
-        </h3>
-        <div className="space-y-1 text-xs text-slate-400 mb-3">
-          <div className="flex items-center gap-1.5">
-            <Icon.Pin />
-            <span className="truncate">
-              {item.locationOriginal || item.location || "—"}
+      {team ? (
+        <form onSubmit={transmit} className="tn-wire-form">
+          <div className="tn-wire-prompt">
+            <span className="text-ch-acc text-xs shrink-0">&gt;</span>
+            <input
+              type="text"
+              value={message}
+              maxLength={INTEL_MAX}
+              onChange={(e) => setMessage(e.target.value)}
+              placeholder="found something near the library…"
+              aria-label="Intel message"
+            />
+            <span className="tn-label shrink-0 tabular-nums">
+              {INTEL_MAX - message.length}
             </span>
           </div>
-          <div className="flex items-center gap-1.5">
-            <Icon.Calendar />
-            <span>{formatDate(item.date)}</span>
-          </div>
-        </div>
-        {item.description && (
-          <p className="text-sm text-slate-300 mb-4 tn-line-clamp-2">
-            {item.description}
-          </p>
-        )}
-        <div className="flex items-center gap-2 pt-2 border-t border-white/[0.06]">
-          <button
-            onClick={() => onContact(item)}
-            className="flex-1 tn-btn tn-btn-ghost text-xs py-2"
-          >
-            <Icon.Mail />
-            Contact
-          </button>
-          {currentUser && currentUser.uid === item.userId && (
+
+          <div className="flex items-center gap-2 mt-2">
             <button
-              onClick={() => onDelete(item.id)}
-              className="tn-btn text-xs py-2 px-3 bg-rose-500/10 text-rose-300 border border-rose-500/30 hover:bg-rose-500/20"
-              title="Delete"
+              type="button"
+              onClick={draftPin ? onClearPin : onTogglePick}
+              className={cn(
+                "tn-btn tn-btn-ghost flex-1 !px-2",
+                (picking || draftPin) && "tn-btn-armed",
+              )}
+              title="Attach a map pin. Nobody can tell whether it's real or a bluff."
             >
-              <Icon.Trash />
+              <Icon.Pin />
+              {draftPin
+                ? "Pin set · remove"
+                : picking
+                  ? "Click the map…"
+                  : "Drop a pin"}
+            </button>
+            <Tilt
+              as="button"
+              max={14}
+              type="submit"
+              disabled={busy || cooling || !message.trim()}
+              className="tn-btn tn-btn-primary"
+            >
+              {busy ? "Sending…" : cooling ? "Cooling…" : "Transmit"}
+            </Tilt>
+          </div>
+
+          <div className="tn-label mt-2 normal-case tracking-normal">
+            {err ? (
+              <span className="text-ch-danger">{err}</span>
+            ) : draftPin ? (
+              <>
+                pin at {draftPin[0].toFixed(4)}, {draftPin[1].toFixed(4)} —
+                real lead or bluff, it looks identical to everyone else
+              </>
+            ) : (
+              "pins are optional. real lead or bluff — your call."
+            )}
+          </div>
+        </form>
+      ) : (
+        <div className="tn-wire-form flex items-center justify-between gap-3">
+          <span className="tn-label normal-case tracking-normal">
+            {user
+              ? "enrol your agency in the vault to transmit"
+              : "read-only. sign in to transmit"}
+          </span>
+          {user ? (
+            <a href="#vault" className="tn-btn tn-btn-ghost">
+              Enrol
+            </a>
+          ) : (
+            <button onClick={onSignIn} className="tn-btn tn-btn-ghost">
+              Sign in
             </button>
           )}
         </div>
-      </div>
-    </motion.article>
+      )}
+    </Tilt>
   );
 }
 
-function ItemGrid({
-  items,
-  currentUser,
-  onContact,
-  onDelete,
-  viewingMyPosts,
-  onShowAll,
-}) {
-  const [search, setSearch] = useState("");
-  const [typeFilter, setTypeFilter] = useState("");
-  const [categoryFilter, setCategoryFilter] = useState("");
+/* ================== THE VAULT (CLUES + PASSCODE) ================== */
 
-  const filtered = useMemo(() => {
-    let f = items;
-    if (typeFilter) f = f.filter((i) => i.type === typeFilter);
-    if (categoryFilter) f = f.filter((i) => i.category === categoryFilter);
-    if (search.trim()) {
-      const q = search.toLowerCase();
-      f = f.filter(
-        (i) =>
-          (i.itemOriginal || i.item || "").toLowerCase().includes(q) ||
-          (i.description || "").toLowerCase().includes(q) ||
-          (i.locationOriginal || i.location || "").toLowerCase().includes(q),
-      );
+const CELEBRATION_MS = 2600;
+
+function RegisterTeamCard({ user }) {
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setErr("");
+    setBusy(true);
+    try {
+      await registerTeam(user, name);
+    } catch (e2) {
+      setErr(e2.message || "Couldn't register your agency.");
+    } finally {
+      setBusy(false);
     }
-    return f;
-  }, [items, search, typeFilter, categoryFilter]);
+  };
 
   return (
-    <section className="px-3 sm:px-6 lg:px-10 pt-8">
-      <div className="mb-4 px-1 flex items-end justify-between flex-wrap gap-3">
-        <div>
-          <div className="text-[10px] uppercase tracking-[0.22em] text-cyan-400 font-mono mb-1.5 flex items-center gap-2">
-            <span className="w-3 h-px bg-cyan-400" />
-            Section 05 · Items
+    <Tilt max={4} className="tn-panel p-6 sm:p-8 max-w-xl">
+      <div className="tn-z1 tn-label tn-label-acc mb-2">// enrolment</div>
+      <h3 className="tn-z2 tn-heading text-xl mb-2">Name your agency</h3>
+      <p className="tn-z1 text-sm text-ch-mute mb-5">
+        This is the callsign shown on the leaderboard and the wire. One agency
+        per account, and it can't be changed mid-hunt.
+      </p>
+      <form onSubmit={submit} className="tn-z2 tn-3d flex flex-col sm:flex-row gap-2">
+        <input
+          type="text"
+          value={name}
+          maxLength={40}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="e.g. baker street irregulars"
+          aria-label="Agency name"
+          className="tn-input flex-1"
+        />
+        <Tilt
+          as="button"
+          max={14}
+          type="submit"
+          disabled={busy}
+          className="tn-btn tn-btn-primary px-5"
+        >
+          {busy ? "Enrolling…" : "Take the case"}
+        </Tilt>
+      </form>
+      {err && <div className="mt-3 text-xs font-mono text-ch-danger">{err}</div>}
+    </Tilt>
+  );
+}
+
+// The active clue. Stays mounted across clues so the unlock
+// celebration can cover the moment the Firestore snapshot swaps in
+// the next file underneath it.
+function Vault({ clue, index, total, user, team, onViewOnMap }) {
+  const [attempt, setAttempt] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [denied, setDenied] = useState(false);
+  const [err, setErr] = useState("");
+  const [granted, setGranted] = useState(null); // { title, last }
+  const timers = useRef([]);
+  useEffect(() => () => timers.current.forEach(clearTimeout), []);
+
+  const title = useScramble(clue?.title || "Untitled file", 600);
+  const riddle = useScramble(clue?.riddle || "", 1100);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!clue || busy || granted || !attempt.trim()) return;
+    setErr("");
+    setBusy(true);
+    try {
+      const ok = await submitPasscode({ user, clue, index, attempt });
+      if (ok) {
+        setAttempt("");
+        setGranted({ title: clue.title, last: index === total - 1 });
+        timers.current.push(
+          setTimeout(() => setGranted(null), CELEBRATION_MS),
+        );
+      } else {
+        setDenied(true);
+        setErr("access denied — passcode rejected");
+        timers.current.push(setTimeout(() => setDenied(false), 500));
+      }
+    } catch (e2) {
+      setErr(e2.message || "Couldn't submit the passcode.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const dialState = granted
+    ? "granted"
+    : denied
+      ? "denied"
+      : busy
+        ? "busy"
+        : "idle";
+  const breached = !clue; // every file solved
+
+  return (
+    <Tilt max={2.5} className="tn-panel">
+      <div className="tn-3d flex flex-col md:flex-row items-center gap-8 lg:gap-12 p-6 sm:p-10">
+        <Tilt max={18} className="tn-vault-dial tn-z2" data-state={breached ? "granted" : dialState}>
+          <span className="tn-ring tn-ring-1" />
+          <span className="tn-ring tn-ring-2" />
+          <span className="tn-ring tn-ring-3" />
+          <span className="tn-vault-core">
+            {granted || breached ? <Icon.Check /> : <Icon.Lock />}
+            <span className="font-mono text-[10px] tracking-[0.16em]">
+              {breached
+                ? "OPEN"
+                : `FILE ${String(clue.order ?? index + 1).padStart(2, "0")}`}
+            </span>
+          </span>
+        </Tilt>
+
+        {breached ? (
+          <div className="tn-z1 flex-1 min-w-0 text-center md:text-left">
+            <div className="tn-label tn-label-acc mb-2">
+              // all {total} vaults breached
+            </div>
+            <h3 className="tn-heading text-2xl sm:text-3xl mb-3">
+              Case closed, <em>{team.teamName}</em>
+            </h3>
+            <p className="text-sm text-ch-mute font-mono">
+              final score {team.score || 0} pts. watch the leaderboard — ties
+              go to whoever finished first.
+            </p>
           </div>
-          <h2 className="text-2xl sm:text-3xl font-semibold tracking-tight">
-            {viewingMyPosts ? "Your Posts" : "Recovery Feed"}
-          </h2>
-          <p className="text-sm text-slate-400 mt-1">
-            {viewingMyPosts
-              ? "Items you've reported on the network."
-              : "All active items in the recovery graph."}
-          </p>
-        </div>
-        {viewingMyPosts && (
-          <button onClick={onShowAll} className="tn-btn tn-btn-ghost">
-            ← Back to all
-          </button>
+        ) : (
+          <div className="tn-3d flex-1 min-w-0 w-full">
+            <div className="tn-z1 flex items-center justify-between gap-3 mb-3">
+              <span className="tn-label tn-label-acc">
+                // file {index + 1} of {total} · encrypted payload
+              </span>
+              <span className="tn-chip">+{POINTS_PER_CLUE} pts</span>
+            </div>
+
+            <h3 className="tn-z2 tn-heading text-xl sm:text-2xl mb-3 break-words">
+              {title}
+            </h3>
+            <p className="tn-z1 tn-cipher mb-6">{riddle}</p>
+
+            <form onSubmit={submit} className="tn-z2 tn-3d">
+              <label className="tn-label block mb-1.5" htmlFor="vault-passcode">
+                passcode recovered at the scene
+              </label>
+              <div className="flex flex-col sm:flex-row gap-2">
+                <div className={cn("tn-wire-prompt flex-1", denied && "tn-shake")}>
+                  <span className="text-ch-acc font-mono text-sm shrink-0">&gt;</span>
+                  <input
+                    id="vault-passcode"
+                    type="text"
+                    value={attempt}
+                    onChange={(e) => setAttempt(e.target.value)}
+                    placeholder="enter passcode"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    autoComplete="off"
+                    spellCheck={false}
+                    className="font-mono !text-sm tracking-[0.12em]"
+                  />
+                </div>
+                <Tilt
+                  as="button"
+                  max={14}
+                  type="submit"
+                  disabled={busy || !!granted || !attempt.trim()}
+                  className="tn-btn tn-btn-primary px-6 py-3.5"
+                >
+                  {busy ? "Decrypting…" : "Decrypt"}
+                </Tilt>
+              </div>
+            </form>
+
+            <div className="tn-z1 flex items-center justify-between gap-3 mt-3 font-mono text-[11px]">
+              <span className={err ? "text-ch-danger" : "text-ch-mute"}>
+                {err || "awaiting passcode…"}
+              </span>
+              {clueCoords(clue) && (
+                <button
+                  type="button"
+                  onClick={() => onViewOnMap(clue.id)}
+                  className="inline-flex items-center gap-1.5 text-ch-ice hover:text-white uppercase tracking-wider"
+                >
+                  <Icon.Pin />
+                  View on map
+                </button>
+              )}
+            </div>
+          </div>
         )}
       </div>
 
-      <div className="tn-glass rounded-2xl p-3 mb-5 flex flex-col sm:flex-row gap-2">
-        <div className="flex-1 relative">
-          <div className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none">
-            <Icon.Search />
-          </div>
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search items, descriptions, locations…"
-            className="tn-input pl-10"
-          />
-        </div>
-        <select
-          value={typeFilter}
-          onChange={(e) => setTypeFilter(e.target.value)}
-          className="tn-input sm:w-40"
-        >
-          <option value="">All Types</option>
-          <option value="lost">Lost</option>
-          <option value="found">Found</option>
-        </select>
-        <select
-          value={categoryFilter}
-          onChange={(e) => setCategoryFilter(e.target.value)}
-          className="tn-input sm:w-44"
-        >
-          <option value="">All Categories</option>
-          {CATEGORIES.map((c) => (
-            <option key={c} value={c}>
-              {c}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      {filtered.length === 0 ? (
-        <div className="tn-glass rounded-2xl p-12 text-center">
-          <div className="inline-flex items-center justify-center w-14 h-14 rounded-xl bg-white/[0.03] border border-white/[0.06] mb-4 text-slate-500">
-            <Icon.Search />
-          </div>
-          <p className="text-slate-200 text-base font-medium mb-1">
-            No items match your filters
-          </p>
-          <p className="text-slate-500 text-sm">
-            Try widening your search or clear the filters above.
-          </p>
-        </div>
-      ) : (
-        <motion.div
-          layout
-          className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 sm:gap-4"
-        >
-          <AnimatePresence mode="popLayout">
-            {filtered.map((item, idx) => (
-              <ItemCard
-                key={item.id}
-                item={item}
-                idx={idx}
-                currentUser={currentUser}
-                onContact={onContact}
-                onDelete={onDelete}
+      {granted && (
+        <div className="tn-granted" role="status">
+          <div className="tn-burst" aria-hidden="true">
+            {Array.from({ length: 28 }, (_, i) => (
+              <i
+                key={i}
+                style={{
+                  "--a": `${(i * 360) / 28}deg`,
+                  "--d": `${140 + (i % 4) * 55}px`,
+                  "--dl": `${(i % 3) * 0.05}s`,
+                }}
               />
             ))}
-          </AnimatePresence>
-        </motion.div>
+          </div>
+          <div className="tn-granted-title">ACCESS GRANTED</div>
+          <div className="font-mono text-sm text-white">
+            {granted.title} · +{POINTS_PER_CLUE} pts
+          </div>
+          <div className="tn-label">
+            {granted.last ? "final vault breached" : "decrypting next file…"}
+          </div>
+        </div>
       )}
+    </Tilt>
+  );
+}
+
+function ArchiveCard({ clue, index, solved, onViewOnMap }) {
+  return (
+    <Tilt max={9} className={cn("tn-panel p-4", !solved && "opacity-60")}>
+      <div className="tn-z1 flex items-center justify-between gap-2 mb-2">
+        <span className="tn-label">
+          file {String(clue.order ?? index + 1).padStart(2, "0")}
+        </span>
+        <span
+          className="tn-chip"
+          style={{ "--c": solved ? "var(--ice)" : "var(--mute)" }}
+        >
+          {solved ? <Icon.Check /> : <Icon.Lock />}
+          {solved ? "Breached" : "Sealed"}
+        </span>
+      </div>
+      {solved ? (
+        <>
+          <h4 className="tn-z2 font-semibold text-white mb-1 break-words">
+            {clue.title || "Untitled file"}
+          </h4>
+          <p className="tn-z1 text-xs text-ch-mute font-mono leading-relaxed whitespace-pre-line">
+            {clue.riddle}
+          </p>
+          {clueCoords(clue) && (
+            <button
+              type="button"
+              onClick={() => onViewOnMap(clue.id)}
+              className="tn-z1 mt-3 inline-flex items-center gap-1.5 font-mono text-[11px] text-ch-ice hover:text-white uppercase tracking-wider"
+            >
+              <Icon.Pin />
+              View on map
+            </button>
+          )}
+        </>
+      ) : (
+        <p className="tn-z1 font-mono text-xs text-ch-mute break-all select-none">
+          ▓▓▒░█▓▒▒░░▓█▒░▓▓▒░░█▓▒░▓▒▒░█▓░▒▓
+          <br />
+          breach the previous file to decrypt
+        </p>
+      )}
+    </Tilt>
+  );
+}
+
+function VaultSection({
+  clues,
+  user,
+  team,
+  teamLoading,
+  solvedCount,
+  onSignIn,
+  onViewOnMap,
+}) {
+  let body;
+  if (!user) {
+    body = (
+      <Tilt max={4} className="tn-panel p-6 sm:p-8 max-w-xl">
+        <div className="tn-z1 tn-label tn-label-acc mb-2">// access denied</div>
+        <h3 className="tn-z2 tn-heading text-xl mb-2">Agency eyes only</h3>
+        <p className="tn-z1 text-sm text-ch-mute mb-5">
+          Sign in to enrol your agency and receive your first encrypted file.
+        </p>
+        <Tilt
+          as="button"
+          max={14}
+          onClick={onSignIn}
+          className="tn-z2 tn-btn tn-btn-primary px-5 py-3.5"
+        >
+          Sign in to begin
+        </Tilt>
+      </Tilt>
+    );
+  } else if (teamLoading) {
+    body = (
+      <div className="tn-panel p-6 font-mono text-sm text-ch-mute">
+        <span className="tn-caret">querying the archives</span>
+      </div>
+    );
+  } else if (!team) {
+    body = <RegisterTeamCard user={user} />;
+  } else if (clues.length === 0) {
+    body = (
+      <div className="tn-panel p-6 font-mono text-sm text-ch-mute">
+        // no files uploaded yet. the hunt master is still setting the scene.
+      </div>
+    );
+  } else {
+    const archive = clues
+      .map((clue, index) => ({ clue, index }))
+      .filter(({ index }) => index !== solvedCount);
+    body = (
+      <>
+        <Vault
+          clue={clues[solvedCount] || null}
+          index={solvedCount}
+          total={clues.length}
+          user={user}
+          team={team}
+          onViewOnMap={onViewOnMap}
+        />
+        {archive.length > 0 && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mt-4">
+            {archive.map(({ clue, index }) => (
+              <ArchiveCard
+                key={clue.id}
+                clue={clue}
+                index={index}
+                solved={index < solvedCount}
+                onViewOnMap={onViewOnMap}
+              />
+            ))}
+          </div>
+        )}
+      </>
+    );
+  }
+
+  return (
+    <section id="vault" className="px-3 sm:px-6 lg:px-10 pt-12 scroll-mt-24">
+      <SectionHeading
+        label="decryption vault"
+        lead="Case"
+        accent="Files"
+        blurb="Solve the riddle, get to the location, and enter the passcode you find there. Each breach decrypts the next file."
+      >
+        {team && clues.length > 0 && (
+          <span className="tn-chip">
+            {solvedCount} / {clues.length} breached
+          </span>
+        )}
+      </SectionHeading>
+      {body}
     </section>
   );
 }
 
-/* ================== POST ITEM SHEET ================== */
+/* ================== LEADERBOARD ================== */
 
-function Field({
-  label,
-  v,
-  onChange,
-  placeholder,
-  type = "text",
-  as = "input",
-  full,
-  children,
-}) {
+// `teams` arrives already ranked (score desc, lastSolvedAt asc) from
+// the onSnapshot listener in useTeams; framer-motion's `layout` slides
+// rows to their new position whenever the order changes.
+function LeaderboardSection({ teams, clueCount, currentUid }) {
   return (
-    <div className={full ? "sm:col-span-2" : ""}>
-      <label className="block text-[10px] uppercase tracking-[0.18em] text-slate-400 font-mono mb-1.5">
-        {label}
-      </label>
-      {as === "textarea" ? (
-        <textarea
-          value={v}
-          onChange={onChange}
-          placeholder={placeholder}
-          rows={3}
-          className="tn-input resize-none"
-        />
-      ) : as === "select" ? (
-        <select value={v} onChange={onChange} className="tn-input">
-          {children}
-        </select>
-      ) : (
-        <input
-          type={type}
-          value={v}
-          onChange={onChange}
-          placeholder={placeholder}
-          className="tn-input"
-        />
-      )}
-    </div>
-  );
-}
-
-/* ================== CHAT MODAL ================== */
-
-function ChatModal({ claim, currentUser, onClose }) {
-  const messages = useChatMessages(claim?.id);
-  const [text, setText] = useState("");
-  const [sending, setSending] = useState(false);
-  const [err, setErr] = useState("");
-  const scrollRef = useRef(null);
-  const inputRef = useRef(null);
-
-  // Auto-scroll on new messages
-  useEffect(() => {
-    if (!scrollRef.current) return;
-    scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [messages, claim?.id]);
-
-  // Mark seen when chat is open / new messages arrive
-  useEffect(() => {
-    if (claim?.id) markSeen(claim.id);
-  }, [claim?.id, messages.length]);
-
-  // Focus the input when opened
-  useEffect(() => {
-    if (claim && inputRef.current) {
-      const t = setTimeout(() => inputRef.current?.focus(), 120);
-      return () => clearTimeout(t);
-    }
-  }, [claim?.id]);
-
-  const peerName = useMemo(() => {
-    if (!claim || !currentUser) return "—";
-    return claim.ownerUid === currentUser.uid
-      ? claim.claimantName || "Claimant"
-      : claim.ownerName || "Owner";
-  }, [claim, currentUser]);
-
-  const handleSend = async () => {
-    setErr("");
-    const t = text.trim();
-    if (!t || !currentUser || !claim) return;
-    setSending(true);
-    try {
-      await sendChatMessage({
-        claimId: claim.id,
-        currentUser,
-        text: t,
-      });
-      setText("");
-    } catch (e) {
-      setErr(e.message || "Failed to send.");
-    } finally {
-      setSending(false);
-    }
-  };
-
-  return (
-    <AnimatePresence>
-      {claim && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          className="fixed inset-0 z-[70] flex items-end sm:items-center justify-center p-2 sm:p-4 bg-black/70 backdrop-blur-sm"
-          onClick={onClose}
-        >
-          <motion.div
-            initial={{ y: 28, opacity: 0, scale: 0.97 }}
-            animate={{ y: 0, opacity: 1, scale: 1 }}
-            exit={{ y: 28, opacity: 0, scale: 0.97 }}
-            transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
-            onClick={(e) => e.stopPropagation()}
-            className="tn-chat tn-glass-strong w-full max-w-md rounded-3xl flex flex-col max-h-[88vh] sm:max-h-[78vh] relative overflow-hidden"
-          >
-            <div className="pointer-events-none absolute inset-0 rounded-3xl tn-grad-border opacity-70" />
-
-            {/* Header */}
-            <div className="relative flex items-center gap-3 px-5 py-4 border-b border-white/[0.06]">
-              <div className="w-10 h-10 rounded-xl shrink-0 flex items-center justify-center bg-gradient-to-br from-cyan-500/30 to-purple-500/30 border border-cyan-400/30 text-cyan-300 shadow-[0_0_18px_rgba(34,211,238,0.3)]">
-                <Icon.Brain />
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="text-[10px] uppercase tracking-[0.18em] font-mono text-cyan-300 mb-0.5">
-                  Secure thread · claim {claim.id?.slice(0, 6)}
-                </div>
-                <div className="text-base font-semibold text-slate-100 truncate">
-                  {peerName}
-                </div>
-                <div className="text-[11px] text-slate-500 font-mono truncate">
-                  re: {claim.itemTitle || "—"}
-                </div>
-              </div>
-              <button
-                onClick={onClose}
-                className="w-8 h-8 rounded-lg bg-black/40 backdrop-blur border border-white/[0.08] flex items-center justify-center text-slate-300 hover:text-white"
-                aria-label="Close chat"
-              >
-                <Icon.X />
-              </button>
-            </div>
-
-            {/* Messages */}
-            <div
-              ref={scrollRef}
-              className="relative flex-1 overflow-y-auto px-4 py-4 space-y-2"
-            >
-              {messages.length === 0 ? (
-                <div className="h-full min-h-[180px] flex flex-col items-center justify-center text-center px-6 text-slate-500">
-                  <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-white/[0.03] border border-white/[0.06] mb-3 text-slate-400">
-                    <Icon.Sparkles />
-                  </div>
-                  <p className="text-sm text-slate-300 font-medium">
-                    Say hi to {peerName}
-                  </p>
-                  <p className="text-xs mt-1">
-                    Both of you can now coordinate the handoff.
-                  </p>
-                </div>
-              ) : (
-                messages.map((m, i) => {
-                  const mine = m.senderUid === currentUser?.uid;
-                  const prev = messages[i - 1];
-                  const sameAuthor =
-                    prev &&
-                    prev.senderUid === m.senderUid &&
-                    Math.abs(
-                      tsToMillis(m.createdAt) - tsToMillis(prev.createdAt),
-                    ) <
-                      5 * 60 * 1000;
-                  return (
-                    <div
-                      key={m.id}
-                      className={cn(
-                        "flex flex-col",
-                        mine ? "items-end" : "items-start",
-                      )}
-                    >
-                      {!sameAuthor && (
-                        <div
-                          className={cn(
-                            "text-[9.5px] font-mono uppercase tracking-[0.16em] mb-1 px-1",
-                            mine ? "text-cyan-300/80" : "text-slate-500",
-                          )}
-                        >
-                          {mine ? "You" : m.senderName || "User"}
-                        </div>
-                      )}
-                      <div
-                        className={cn(
-                          "tn-bubble max-w-[80%] px-3 py-2 text-[13.5px] leading-relaxed",
-                          mine ? "tn-bubble-mine" : "tn-bubble-theirs",
-                        )}
-                      >
-                        <div className="whitespace-pre-wrap break-words">
-                          {m.text}
-                        </div>
-                        <div
-                          className={cn(
-                            "text-[9.5px] font-mono mt-1 tabular-nums",
-                            mine ? "text-cyan-50/70" : "text-slate-500",
-                          )}
-                        >
-                          {formatTime(m.createdAt)}
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })
-              )}
-            </div>
-
-            {/* Composer */}
-            <div className="relative px-3 sm:px-4 py-3 border-t border-white/[0.06] bg-[#0a0c1a]/70 backdrop-blur">
-              {err && (
-                <div className="mb-2 px-3 py-1.5 rounded-lg bg-rose-500/10 border border-rose-500/30 text-[11px] text-rose-300">
-                  {err}
-                </div>
-              )}
-              <div className="flex items-center gap-2">
-                <input
-                  ref={inputRef}
-                  type="text"
-                  value={text}
-                  onChange={(e) => setText(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
-                      handleSend();
-                    }
-                  }}
-                  placeholder="Type a message…"
-                  className="tn-input"
-                  disabled={!currentUser || sending}
-                  maxLength={2000}
-                />
-                <button
-                  onClick={handleSend}
-                  disabled={!text.trim() || !currentUser || sending}
-                  className="tn-btn tn-btn-primary px-4 py-2.5 text-sm shrink-0"
-                  title="Send"
-                >
-                  <Icon.Bolt />
-                  <span className="hidden sm:inline">
-                    {sending ? "Sending…" : "Send"}
-                  </span>
-                </button>
-              </div>
-              <div className="mt-1.5 text-[9.5px] font-mono text-slate-600 uppercase tracking-wider">
-                Encrypted in transit · stored on Firebase
-              </div>
-            </div>
-          </motion.div>
-        </motion.div>
-      )}
-    </AnimatePresence>
-  );
-}
-
-/* ================== CLAIMS PANEL ================== */
-
-function ClaimRow({
-  claim,
-  currentUser,
-  isUnread,
-  onApprove,
-  onReject,
-  onOpenChat,
-  busy,
-}) {
-  const isOwner = claim.ownerUid === currentUser?.uid;
-  const isClaimant = claim.claimantUid === currentUser?.uid;
-  const peer = isOwner ? claim.claimantName : claim.ownerName;
-  const status = claim.status || "pending";
-  const statusColor =
-    status === "approved"
-      ? "#34d399"
-      : status === "rejected"
-        ? "#fb7185"
-        : "#fbbf24";
-  const created = formatTime(claim.createdAt);
-  const last = claim.lastMessageAt ? formatTime(claim.lastMessageAt) : created;
-
-  return (
-    <div className="relative tn-glass rounded-2xl p-3 hover:border-cyan-400/30 transition-colors">
-      {isUnread && (
-        <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-cyan-400 shadow-[0_0_10px_rgba(34,211,238,0.9)]">
-          <span className="absolute inset-0 rounded-full bg-cyan-400 animate-ping opacity-70" />
+    <section id="leaderboard" className="px-3 sm:px-6 lg:px-10 pt-12 scroll-mt-24">
+      <SectionHeading
+        label="live standings"
+        lead="Agency"
+        accent="Leaderboard"
+        blurb="Ranked by points. Ties go to the agency that breached its latest file first."
+      >
+        <span className="tn-chip">
+          <span className="tn-dot" />
+          {teams.length} {teams.length === 1 ? "agency" : "agencies"}
         </span>
-      )}
-      <div className="flex items-start gap-3">
-        <div
-          className="w-9 h-9 rounded-lg shrink-0 flex items-center justify-center text-xs font-mono"
-          style={{
-            background: `${statusColor}1f`,
-            color: statusColor,
-            border: `1px solid ${statusColor}55`,
-            boxShadow: `0 0 10px ${statusColor}30`,
-          }}
-        >
-          {status === "approved" ? "✓" : status === "rejected" ? "✗" : "•"}
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-baseline justify-between gap-2">
-            <div className="text-sm font-semibold text-slate-100 truncate">
-              {peer || "Unknown"}
-            </div>
-            <div className="text-[10px] font-mono text-slate-500 shrink-0">
-              {last}
-            </div>
+      </SectionHeading>
+
+      <Tilt max={1.5} className="tn-panel">
+        {teams.length === 0 ? (
+          <div className="p-6 font-mono text-sm text-ch-mute">
+            // no agencies enrolled yet. be the first on the case.
           </div>
-          <div className="text-[12px] text-slate-400 truncate">
-            re: <span className="text-slate-300">{claim.itemTitle || "—"}</span>
-          </div>
-          {claim.lastMessageText ? (
-            <div className="text-[12px] text-slate-500 truncate mt-0.5">
-              {claim.lastMessageBy === currentUser?.uid ? "You: " : ""}
-              {claim.lastMessageText}
-            </div>
-          ) : claim.note ? (
-            <div className="text-[12px] text-slate-500 italic truncate mt-0.5">
-              "{claim.note}"
-            </div>
-          ) : null}
-
-          <div className="mt-2 flex items-center gap-2 flex-wrap">
-            <span
-              className="px-2 py-0.5 rounded-md text-[9.5px] font-mono uppercase tracking-[0.12em]"
-              style={{
-                background: `${statusColor}1a`,
-                color: statusColor,
-                border: `1px solid ${statusColor}40`,
-              }}
-            >
-              {status}
-            </span>
-            <span className="px-2 py-0.5 rounded-md text-[9.5px] font-mono uppercase tracking-[0.12em] bg-white/[0.04] border border-white/[0.06] text-slate-400">
-              {isOwner ? "you · finder" : "you · claimant"}
-            </span>
-            <div className="ml-auto flex items-center gap-1.5">
-              {status === "pending" && isOwner && (
-                <>
-                  <button
-                    onClick={() => onReject(claim)}
-                    disabled={busy}
-                    className="tn-btn tn-btn-ghost text-[11px] px-2.5 py-1 disabled:opacity-50"
-                    title="Reject"
-                  >
-                    Reject
-                  </button>
-                  <button
-                    onClick={() => onApprove(claim)}
-                    disabled={busy}
-                    className="tn-btn tn-btn-primary text-[11px] px-2.5 py-1 disabled:opacity-60"
-                    title="Approve"
-                  >
-                    Approve
-                  </button>
-                </>
-              )}
-              {status === "approved" && (
-                <button
-                  onClick={() => onOpenChat(claim)}
-                  className="tn-btn tn-btn-primary text-[11px] px-2.5 py-1"
-                >
-                  Open chat
-                </button>
-              )}
-              {status === "rejected" && isClaimant && (
-                <span className="text-[10px] text-slate-500 font-mono">
-                  No reply available
-                </span>
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ClaimsPanel({ open, onClose, claims, currentUser, onOpenChat }) {
-  const [tab, setTab] = useState("inbox"); // 'inbox' | 'mine'
-  const [busyId, setBusyId] = useState(null);
-  const [seenTick, setSeenTick] = useState(0);
-
-  const seen = useMemo(() => readSeen(), [seenTick, claims]);
-
-  const inbox = useMemo(
-    () =>
-      claims.filter(
-        (c) =>
-          c.ownerUid === currentUser?.uid && c.claimantUid !== currentUser?.uid,
-      ),
-    [claims, currentUser],
-  );
-  const mine = useMemo(
-    () =>
-      claims.filter(
-        (c) =>
-          c.claimantUid === currentUser?.uid && c.ownerUid !== currentUser?.uid,
-      ),
-    [claims, currentUser],
-  );
-
-  const list = tab === "inbox" ? inbox : mine;
-  const inboxUnread = inbox.filter((c) =>
-    claimIsUnread(c, currentUser?.uid, seen),
-  ).length;
-  const mineUnread = mine.filter((c) =>
-    claimIsUnread(c, currentUser?.uid, seen),
-  ).length;
-
-  const handleApprove = async (claim) => {
-    setBusyId(claim.id);
-    try {
-      await setClaimStatus(claim, "approved");
-    } catch (e) {
-      alert("Approve failed: " + e.message);
-    } finally {
-      setBusyId(null);
-    }
-  };
-  const handleReject = async (claim) => {
-    setBusyId(claim.id);
-    try {
-      await setClaimStatus(claim, "rejected");
-    } catch (e) {
-      alert("Reject failed: " + e.message);
-    } finally {
-      setBusyId(null);
-    }
-  };
-
-  const handleOpen = (claim) => {
-    markSeen(claim.id);
-    setSeenTick((t) => t + 1);
-    onOpenChat(claim);
-  };
-
-  return (
-    <AnimatePresence>
-      {open && (
-        <>
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            onClick={onClose}
-            className="fixed inset-0 bg-black/70 backdrop-blur-sm z-[58]"
-          />
-          <motion.aside
-            initial={{ x: "100%" }}
-            animate={{ x: 0 }}
-            exit={{ x: "100%" }}
-            transition={{ type: "spring", damping: 30, stiffness: 240 }}
-            className="fixed top-0 right-0 bottom-0 w-full sm:w-[440px] z-[59] overflow-y-auto"
-          >
-            <div className="tn-glass-strong h-full p-5 sm:p-6 border-l border-white/[0.08]">
-              <div className="flex items-start justify-between mb-5">
-                <div>
-                  <div className="text-[10px] uppercase tracking-[0.22em] text-cyan-400 font-mono mb-1">
-                    Inbox · Claims
-                  </div>
-                  <h2 className="text-2xl font-semibold tracking-tight">
-                    Conversations
-                  </h2>
-                  <p className="text-xs text-slate-400 mt-1">
-                    Approve a claim to open a secure thread.
-                  </p>
-                </div>
-                <button
-                  onClick={onClose}
-                  className="tn-btn tn-btn-ghost p-2 -mr-1 rounded-lg"
-                  aria-label="Close"
-                >
-                  <Icon.X />
-                </button>
-              </div>
-
-              <div className="flex p-1 mb-4 rounded-xl bg-white/[0.04] border border-white/[0.06] text-sm font-medium">
-                {[
-                  {
-                    k: "inbox",
-                    label: "Incoming",
-                    count: inbox.length,
-                    unread: inboxUnread,
-                  },
-                  {
-                    k: "mine",
-                    label: "My claims",
-                    count: mine.length,
-                    unread: mineUnread,
-                  },
-                ].map((t) => (
-                  <button
-                    key={t.k}
-                    onClick={() => setTab(t.k)}
-                    className={cn(
-                      "relative flex-1 py-2 rounded-lg transition-all flex items-center justify-center gap-1.5",
-                      tab === t.k
-                        ? "bg-gradient-to-br from-cyan-500/25 to-purple-500/25 text-white shadow-[0_0_18px_rgba(34,211,238,0.18)] border border-white/[0.08]"
-                        : "text-slate-400 hover:text-slate-200",
-                    )}
-                  >
-                    {t.label}
-                    <span className="text-[10px] font-mono text-slate-500">
-                      {t.count}
-                    </span>
-                    {t.unread > 0 && (
-                      <span className="ml-0.5 inline-flex items-center justify-center min-w-[16px] h-4 px-1 rounded-full bg-cyan-400 text-[9px] font-mono font-bold text-slate-950">
-                        {t.unread}
-                      </span>
-                    )}
-                  </button>
-                ))}
-              </div>
-
-              {!currentUser ? (
-                <div className="tn-glass rounded-2xl p-8 text-center">
-                  <p className="text-sm text-slate-300">
-                    Sign in to see your claims.
-                  </p>
-                </div>
-              ) : list.length === 0 ? (
-                <div className="tn-glass rounded-2xl p-8 text-center">
-                  <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-white/[0.03] border border-white/[0.06] mb-3 text-slate-500">
-                    <Icon.Mail />
-                  </div>
-                  <p className="text-slate-200 text-sm font-medium">
-                    {tab === "inbox"
-                      ? "No incoming claims yet"
-                      : "You haven't claimed anything"}
-                  </p>
-                  <p className="text-slate-500 text-xs mt-1">
-                    {tab === "inbox"
-                      ? "When someone claims one of your reports, it'll show here."
-                      : "Open the map and tap a Found item to claim it."}
-                  </p>
-                </div>
-              ) : (
-                <div className="space-y-2.5">
-                  {list.map((c) => (
-                    <ClaimRow
-                      key={c.id}
-                      claim={c}
-                      currentUser={currentUser}
-                      isUnread={claimIsUnread(c, currentUser.uid, seen)}
-                      onApprove={handleApprove}
-                      onReject={handleReject}
-                      onOpenChat={handleOpen}
-                      busy={busyId === c.id}
-                    />
-                  ))}
-                </div>
-              )}
-            </div>
-          </motion.aside>
-        </>
-      )}
-    </AnimatePresence>
-  );
-}
-
-/* ================== MARKER CARD (rich popup) ================== */
-
-const Phone = () => (
-  <svg
-    width="16"
-    height="16"
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-  >
-    <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.37 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.33 1.85.57 2.81.7a2 2 0 0 1 1.72 2.03Z" />
-  </svg>
-);
-const Compass = () => (
-  <svg
-    width="16"
-    height="16"
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-  >
-    <circle cx="12" cy="12" r="10" />
-    <polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76" />
-  </svg>
-);
-
-function MarkerCard({
-  item,
-  userLocation,
-  allItems,
-  onClose,
-  currentUser,
-  myClaim,
-  claimBusy,
-  onClaim,
-  onOpenChat,
-  onRequireSignIn,
-}) {
-  const isLost = item?.type === "lost";
-  const accent = isLost ? "#fb7185" : "#34d399";
-  const trust = useMemo(
-    () => computeTrustScore(item, allItems),
-    [item, allItems],
-  );
-  const trustL = trustLabel(trust);
-
-  const distance = useMemo(() => {
-    if (!item || !userLocation || !window.L) return null;
-    try {
-      return window.L.latLng(userLocation.coords).distanceTo(
-        window.L.latLng(itemCoords(item)),
-      );
-    } catch {
-      return null;
-    }
-  }, [item, userLocation]);
-
-  const phone = item?.phone || "";
-  const email = item?.email || "";
-  const telHref = phone ? `tel:${phone.replace(/[^\d+]/g, "")}` : null;
-  const mailHref = email
-    ? `mailto:${email}?subject=${encodeURIComponent(
-        `RE: ${item.itemOriginal || item.item || "TraceNet item"}`,
-      )}&body=${encodeURIComponent(
-        `Hi ${item.name || ""},\n\nI'm reaching out via TraceNet AI about the ${
-          isLost ? "item you reported lost" : "item you reported as found"
-        }: "${item.itemOriginal || item.item || ""}".\n\n`,
-      )}`
-    : null;
-
-  const dirHref = useMemo(() => {
-    if (!item) return null;
-    const c = itemCoords(item);
-    if (!c || !Number.isFinite(c[0]) || !Number.isFinite(c[1])) return null;
-    const dest = `${c[0].toFixed(6)},${c[1].toFixed(6)}`;
-    const origin = userLocation
-      ? `&origin=${userLocation.coords[0].toFixed(6)},${userLocation.coords[1].toFixed(6)}`
-      : "";
-    return `https://www.google.com/maps/dir/?api=1&destination=${dest}${origin}`;
-  }, [item, userLocation]);
-
-  if (!item) return null;
-  const gradId = `tn-trust-${(item.id || "x").replace(/[^a-zA-Z0-9_-]/g, "")}`;
-  const fmtDist = formatDistance(distance);
-
-  return (
-    <motion.div
-      key={item.id}
-      initial={{ opacity: 0, y: 28, scale: 0.96 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      exit={{ opacity: 0, y: 28, scale: 0.96 }}
-      transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
-      style={{ "--accent": accent }}
-      className="tn-marker-card fixed z-[55] inset-x-2 bottom-2 sm:inset-x-auto sm:bottom-6 sm:right-6 sm:w-[380px] max-h-[85vh] flex flex-col rounded-3xl overflow-hidden"
-      role="dialog"
-      aria-label={`Details for ${item.itemOriginal || item.item || "item"}`}
-    >
-      <div className="tn-marker-card-inner flex flex-col min-h-0">
-        {/* Photo header */}
-        <div className="relative h-36 shrink-0 overflow-hidden">
-          {item.photoData ? (
-            <img
-              src={item.photoData}
-              alt=""
-              className="w-full h-full object-cover"
-            />
-          ) : (
-            <div
-              className="w-full h-full flex items-center justify-center text-6xl"
-              style={{
-                background: `linear-gradient(135deg, ${accent}30, rgba(8,10,22,0.7))`,
-              }}
-            >
-              <span style={{ opacity: 0.55 }}>
-                {CAT_GLYPH[item.category] || "📦"}
-              </span>
-            </div>
-          )}
-          <div className="absolute inset-0 bg-gradient-to-t from-[#0a0c1a] via-[#0a0c1a]/40 to-transparent" />
-          <div className="absolute top-3 left-3 flex items-center gap-1.5">
-            <span
-              className="px-2.5 py-1 rounded-md text-[10px] font-mono font-bold uppercase tracking-[0.14em] border"
-              style={{
-                background: `${accent}26`,
-                color: accent,
-                borderColor: `${accent}55`,
-                boxShadow: `0 0 14px ${accent}55`,
-              }}
-            >
-              {item.type || "—"}
-            </span>
-            {item.category && (
-              <span className="px-2.5 py-1 rounded-md text-[10px] font-mono uppercase tracking-[0.12em] bg-black/55 backdrop-blur text-slate-200 border border-white/[0.08]">
-                {item.category}
-              </span>
-            )}
-          </div>
-          <button
-            onClick={onClose}
-            className="absolute top-3 right-3 w-8 h-8 rounded-lg bg-black/60 backdrop-blur border border-white/[0.08] flex items-center justify-center text-slate-300 hover:text-white hover:bg-black/80 transition-colors"
-            aria-label="Close"
-          >
-            <Icon.X />
-          </button>
-        </div>
-
-        {/* Body */}
-        <div className="flex-1 overflow-y-auto px-5 pt-4 pb-2">
-          {/* Name + Trust ring */}
-          <div className="flex items-start gap-3 mb-4">
-            <div className="flex-1 min-w-0">
-              <div className="text-[10px] uppercase tracking-[0.2em] font-mono text-slate-500 mb-1">
-                {isLost ? "Reported by" : "Found by"}
-              </div>
-              <div className="text-lg font-semibold text-slate-50 truncate">
-                {item.name || "Anonymous"}
-              </div>
-              <div className="text-[11px] text-slate-500 font-mono mt-0.5">
-                {formatDate(item.date)}
-              </div>
-            </div>
-            <div className="relative w-16 h-16 shrink-0">
-              <svg className="w-16 h-16 -rotate-90" viewBox="0 0 36 36">
-                <circle
-                  cx="18"
-                  cy="18"
-                  r="16"
-                  fill="none"
-                  stroke="rgba(255,255,255,0.06)"
-                  strokeWidth="2.5"
-                />
-                <circle
-                  cx="18"
-                  cy="18"
-                  r="16"
-                  fill="none"
-                  stroke={`url(#${gradId})`}
-                  strokeWidth="2.5"
-                  strokeDasharray={`${((trust * 100.53) / 100).toFixed(2)} 100.53`}
-                  strokeLinecap="round"
-                />
-                <defs>
-                  <linearGradient id={gradId} x1="0" y1="0" x2="1" y2="1">
-                    <stop offset="0%" stopColor="#22d3ee" />
-                    <stop offset="100%" stopColor="#a855f7" />
-                  </linearGradient>
-                </defs>
-              </svg>
-              <div className="absolute inset-0 flex flex-col items-center justify-center">
-                <span className="text-base font-mono font-bold text-slate-100 tabular-nums leading-none">
-                  {trust}
-                </span>
-                <span className="text-[8px] font-mono text-cyan-300 mt-0.5 uppercase tracking-[0.12em]">
-                  trust
-                </span>
-              </div>
-            </div>
-          </div>
-
-          <div className="rounded-xl bg-white/[0.025] border border-white/[0.06] p-3 mb-3">
-            <div className="text-[10px] uppercase tracking-[0.18em] font-mono text-slate-500 mb-1 flex items-center justify-between">
-              <span>Item</span>
-              <span className="text-cyan-300">{trustL}</span>
-            </div>
-            <div className="text-sm font-semibold text-slate-100">
-              {item.itemOriginal || item.item || "—"}
-            </div>
-            {item.description && (
-              <p className="text-[12.5px] text-slate-400 mt-1.5 leading-relaxed tn-line-clamp-3">
-                {item.description}
-              </p>
-            )}
-          </div>
-
-          <div className="grid grid-cols-2 gap-2 mb-3">
-            <div className="rounded-xl bg-white/[0.025] border border-white/[0.06] p-3">
-              <div className="text-[10px] uppercase tracking-[0.16em] font-mono text-slate-500 mb-1 flex items-center gap-1">
-                <Icon.Pin />
-                Location
-              </div>
-              <div className="text-[12.5px] text-slate-200 font-medium tn-line-clamp-2 leading-snug">
-                {item.locationOriginal || item.location || "—"}
-              </div>
-            </div>
-            <div className="rounded-xl bg-white/[0.025] border border-white/[0.06] p-3">
-              <div className="text-[10px] uppercase tracking-[0.16em] font-mono text-slate-500 mb-1 flex items-center gap-1">
-                <Icon.Activity />
-                Distance
-              </div>
-              <div className="text-[12.5px] text-slate-200 font-medium font-mono tabular-nums">
-                {fmtDist || (
-                  <span className="text-slate-500 normal-case">
-                    locate me first
-                  </span>
-                )}
-              </div>
-            </div>
-          </div>
-
-          {(phone || email) && (
-            <div className="space-y-1.5 mb-2">
-              {phone && (
-                <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white/[0.025] border border-white/[0.06]">
-                  <span className="text-emerald-300/80 shrink-0">
-                    <Phone />
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <div className="text-[9.5px] uppercase tracking-[0.16em] font-mono text-slate-500">
-                      Phone
-                    </div>
-                    <div className="text-[12.5px] text-slate-100 font-mono truncate">
-                      {phone}
-                    </div>
-                  </div>
-                </div>
-              )}
-              {email && (
-                <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white/[0.025] border border-white/[0.06]">
-                  <span className="text-cyan-300/80 shrink-0">
-                    <Icon.Mail />
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <div className="text-[9.5px] uppercase tracking-[0.16em] font-mono text-slate-500">
-                      Email
-                    </div>
-                    <div className="text-[12.5px] text-slate-100 font-mono truncate">
-                      {email}
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Claim / chat CTA — only when relevant */}
-        {item.type === "found" &&
-          (currentUser ? item.userId !== currentUser.uid : true) && (
-            <div className="px-4 pb-3">
-              {myClaim ? (
-                <div
-                  className={cn(
-                    "rounded-xl p-3 border text-[12px] font-mono flex items-center gap-2",
-                    myClaim.status === "approved"
-                      ? "bg-emerald-400/10 border-emerald-400/30 text-emerald-200"
-                      : myClaim.status === "rejected"
-                        ? "bg-rose-500/10 border-rose-500/30 text-rose-200"
-                        : "bg-amber-400/10 border-amber-400/30 text-amber-200",
-                  )}
-                >
-                  <span
-                    className={cn(
-                      "w-2 h-2 rounded-full shrink-0",
-                      myClaim.status === "approved"
-                        ? "bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.7)]"
-                        : myClaim.status === "rejected"
-                          ? "bg-rose-400"
-                          : "bg-amber-400 animate-pulse shadow-[0_0_8px_rgba(251,191,36,0.7)]",
-                    )}
-                  />
-                  <span className="flex-1 uppercase tracking-[0.12em]">
-                    {myClaim.status === "approved"
-                      ? "Claim approved"
-                      : myClaim.status === "rejected"
-                        ? "Claim rejected"
-                        : "Claim awaiting approval"}
-                  </span>
-                  {myClaim.status === "approved" && (
-                    <button
-                      onClick={() => onOpenChat?.(myClaim)}
-                      className="tn-btn tn-btn-primary text-[11px] px-3 py-1"
-                    >
-                      <Icon.Mail />
-                      Open chat
-                    </button>
-                  )}
-                </div>
-              ) : (
-                <button
-                  onClick={() => {
-                    if (!currentUser) return onRequireSignIn?.();
-                    onClaim?.(item);
-                  }}
-                  disabled={claimBusy}
-                  className="tn-claim-cta w-full"
-                  style={{ "--c": "#a855f7" }}
-                  title="Notify the finder you'd like to claim this"
-                >
-                  <span className="tn-claim-glow" />
-                  <Icon.Sparkles />
-                  <span>
-                    {claimBusy
-                      ? "Submitting…"
-                      : currentUser
-                        ? "Claim this item"
-                        : "Sign in to claim"}
-                  </span>
-                </button>
-              )}
-            </div>
-          )}
-
-        {/* Action bar */}
-        <div className="shrink-0 px-4 py-3 border-t border-white/[0.06] bg-gradient-to-t from-[#0a0c1a] via-[#0a0c1a]/95 to-[#0a0c1a]/80 grid grid-cols-3 gap-2">
-          <a
-            href={telHref || undefined}
-            onClick={(e) => !telHref && e.preventDefault()}
-            aria-disabled={!telHref}
-            className={cn("tn-action-btn", !telHref && "tn-action-disabled")}
-            style={{ "--c": "#34d399" }}
-          >
-            <span className="tn-action-glow" />
-            <span className="tn-action-icon">
-              <Phone />
-            </span>
-            <span className="tn-action-label">Call</span>
-          </a>
-          <a
-            href={mailHref || undefined}
-            onClick={(e) => !mailHref && e.preventDefault()}
-            aria-disabled={!mailHref}
-            className={cn("tn-action-btn", !mailHref && "tn-action-disabled")}
-            style={{ "--c": "#22d3ee" }}
-          >
-            <span className="tn-action-glow" />
-            <span className="tn-action-icon">
-              <Icon.Mail />
-            </span>
-            <span className="tn-action-label">Email</span>
-          </a>
-          <a
-            href={dirHref || undefined}
-            target="_blank"
-            rel="noreferrer"
-            onClick={(e) => !dirHref && e.preventDefault()}
-            aria-disabled={!dirHref}
-            className={cn("tn-action-btn", !dirHref && "tn-action-disabled")}
-            style={{ "--c": "#a855f7" }}
-          >
-            <span className="tn-action-glow" />
-            <span className="tn-action-icon">
-              <Compass />
-            </span>
-            <span className="tn-action-label">Directions</span>
-          </a>
-        </div>
-      </div>
-    </motion.div>
-  );
-}
-
-/* ================== LOCATION AUTOCOMPLETE (Nominatim) ================== */
-
-const NOMINATIM_URL = "https://nominatim.openstreetmap.org/search";
-const NOMINATIM_REVERSE_URL = "https://nominatim.openstreetmap.org/reverse";
-
-// Build a short, human-readable label from a Nominatim address.
-// Falls back to the full display_name and finally to the raw coords.
-function shortAddressLabel(result, lat, lon) {
-  if (!result) {
-    return `${Number(lat).toFixed(4)}°, ${Number(lon).toFixed(4)}°`;
-  }
-  const a = result.address || {};
-  const primary =
-    a.neighbourhood ||
-    a.suburb ||
-    a.village ||
-    a.hamlet ||
-    a.town ||
-    a.city ||
-    a.county ||
-    a.road ||
-    null;
-  const region = a.state || a.country || "";
-  if (primary) return [primary, region].filter(Boolean).join(", ");
-  if (result.display_name) {
-    // Take the first 2 segments of the long display_name as a sensible label
-    const parts = result.display_name.split(",").map((s) => s.trim());
-    return parts.slice(0, 2).join(", ");
-  }
-  return `${Number(lat).toFixed(4)}°, ${Number(lon).toFixed(4)}°`;
-}
-
-async function reverseGeocode(lat, lon) {
-  const url =
-    `${NOMINATIM_REVERSE_URL}?format=json&lat=${encodeURIComponent(lat)}` +
-    `&lon=${encodeURIComponent(lon)}&zoom=14&addressdetails=1`;
-  const res = await fetch(url, { headers: { Accept: "application/json" } });
-  if (!res.ok) throw new Error(`reverse ${res.status}`);
-  return await res.json();
-}
-
-function primaryName(s) {
-  return (s.display_name || "").split(",")[0].trim() || s.display_name || "—";
-}
-function secondaryName(s) {
-  const parts = (s.display_name || "").split(",");
-  return parts.slice(1).join(",").trim();
-}
-
-function LocationAutocomplete({ value, onChange, onSelect, placeholder }) {
-  const [open, setOpen] = useState(false);
-  const [suggestions, setSuggestions] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [highlight, setHighlight] = useState(-1);
-  const wrapRef = useRef(null);
-  const debounceRef = useRef(null);
-  const reqIdRef = useRef(0);
-
-  // Click outside closes the dropdown
-  useEffect(() => {
-    const onDoc = (e) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target)) {
-        setOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, []);
-
-  // Debounced fetch from Nominatim (free, OSM-backed, no API key)
-  useEffect(() => {
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    const q = (value || "").trim();
-    if (q.length < 2) {
-      setSuggestions([]);
-      setLoading(false);
-      return;
-    }
-    setLoading(true);
-    const myReqId = ++reqIdRef.current;
-    debounceRef.current = setTimeout(async () => {
-      try {
-        const url =
-          `${NOMINATIM_URL}?q=${encodeURIComponent(q)}` +
-          `&format=json&addressdetails=1&limit=6`;
-        const res = await fetch(url, {
-          headers: { Accept: "application/json" },
-        });
-        const data = await res.json();
-        if (myReqId !== reqIdRef.current) return; // discard stale
-        setSuggestions(Array.isArray(data) ? data : []);
-        setHighlight(-1);
-      } catch {
-        if (myReqId === reqIdRef.current) setSuggestions([]);
-      } finally {
-        if (myReqId === reqIdRef.current) setLoading(false);
-      }
-    }, 350);
-    return () => clearTimeout(debounceRef.current);
-  }, [value]);
-
-  const pick = (s) => {
-    onSelect({
-      name: s.display_name,
-      lat: parseFloat(s.lat),
-      lon: parseFloat(s.lon),
-    });
-    setOpen(false);
-    setSuggestions([]);
-    setHighlight(-1);
-  };
-
-  const onKey = (e) => {
-    if (!open || suggestions.length === 0) return;
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      setHighlight((h) => Math.min(h + 1, suggestions.length - 1));
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setHighlight((h) => Math.max(h - 1, -1));
-    } else if (e.key === "Enter" && highlight >= 0) {
-      e.preventDefault();
-      pick(suggestions[highlight]);
-    } else if (e.key === "Escape") {
-      setOpen(false);
-    }
-  };
-
-  const showDropdown =
-    open &&
-    (loading || suggestions.length > 0 || (value || "").trim().length >= 2);
-
-  return (
-    <div ref={wrapRef} className="relative">
-      <div className="relative">
-        <input
-          type="text"
-          value={value || ""}
-          onChange={(e) => {
-            onChange(e.target.value);
-            setOpen(true);
-          }}
-          onFocus={() => setOpen(true)}
-          onKeyDown={onKey}
-          placeholder={placeholder || "Try Hyderabad, HITEC City…"}
-          className="tn-input pr-9"
-          autoComplete="off"
-          spellCheck={false}
-        />
-        {loading ? (
-          <span className="absolute right-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 rounded-full border-2 border-cyan-400/25 border-t-cyan-400 animate-spin" />
         ) : (
-          <span className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500">
-            <Icon.Search />
-          </span>
-        )}
-      </div>
-
-      <AnimatePresence>
-        {showDropdown && (
-          <motion.ul
-            initial={{ opacity: 0, y: -6, scale: 0.98 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: -6, scale: 0.98 }}
-            transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
-            className="tn-autocomplete absolute z-[60] mt-1.5 w-full max-h-72 overflow-auto rounded-xl"
-          >
-            {suggestions.length === 0 ? (
-              <li className="px-3 py-3 text-xs text-slate-500 text-center font-mono">
-                {loading ? "Searching the network…" : "No matches found"}
-              </li>
-            ) : (
-              suggestions.map((s, i) => (
-                <motion.li
-                  key={`${s.place_id}-${i}`}
-                  initial={{ opacity: 0, x: -6 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: i * 0.025, duration: 0.18 }}
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    pick(s);
-                  }}
-                  onMouseEnter={() => setHighlight(i)}
-                  className={cn(
-                    "px-3 py-2.5 text-sm cursor-pointer flex items-start gap-2 rounded-lg transition-colors",
-                    highlight === i
-                      ? "bg-cyan-400/10 text-white"
-                      : "text-slate-200 hover:bg-white/[0.04]",
-                  )}
+          <>
+            <div className="tn-lb-row tn-lb-head tn-label">
+              <span>Rank</span>
+              <span>Agency</span>
+              <span className="text-right">Files</span>
+              <span className="text-right">Points</span>
+              <span className="text-right hidden sm:block">Last breach</span>
+            </div>
+            {teams.map((t, i) => {
+              const mine = t.id === currentUid;
+              const solved = t.cluesSolved || 0;
+              const pct = clueCount
+                ? Math.min(100, (solved / clueCount) * 100)
+                : 0;
+              return (
+                <motion.div
+                  layout
+                  transition={{ type: "spring", stiffness: 420, damping: 36 }}
+                  key={t.id}
+                  className={cn("tn-lb-row", mine && "tn-lb-row-mine")}
                 >
-                  <span className="text-cyan-400 mt-0.5 shrink-0">
-                    <Icon.Pin />
+                  <span className="tn-lb-rank" data-rank={i + 1}>
+                    {i + 1}
                   </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block font-medium truncate">
-                      {primaryName(s)}
-                    </span>
-                    {secondaryName(s) && (
-                      <span className="block text-[11px] text-slate-500 truncate font-mono">
-                        {secondaryName(s)}
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="font-semibold text-white truncate">
+                        {t.teamName || "unnamed agency"}
                       </span>
+                      {mine && <span className="tn-chip">You</span>}
+                      {clueCount > 0 && solved >= clueCount && (
+                        <span
+                          className="tn-chip hidden sm:inline-flex"
+                          style={{ "--c": "var(--ice)" }}
+                        >
+                          Case closed
+                        </span>
+                      )}
+                    </div>
+                    <div className="tn-lb-bar">
+                      <i style={{ width: `${pct}%` }} />
+                    </div>
+                  </div>
+                  <span className="text-right font-mono text-sm tabular-nums text-slate-300">
+                    {solved}
+                    {clueCount > 0 && (
+                      <span className="text-ch-mute">/{clueCount}</span>
                     )}
                   </span>
-                  <span className="text-[10px] text-slate-600 font-mono shrink-0 mt-0.5">
-                    {parseFloat(s.lat).toFixed(2)}°,{" "}
-                    {parseFloat(s.lon).toFixed(2)}°
+                  <span className="text-right font-mono text-base font-bold tabular-nums text-ch-acc">
+                    {t.score || 0}
                   </span>
-                </motion.li>
-              ))
-            )}
-            <li className="px-3 pt-1.5 pb-1 text-[9px] text-slate-600 font-mono uppercase tracking-wider text-right">
-              powered by OpenStreetMap · Nominatim
-            </li>
-          </motion.ul>
+                  <span className="text-right font-mono text-[11px] text-ch-mute hidden sm:block">
+                    {formatRelativeTime(t.lastSolvedAt) || "—"}
+                  </span>
+                </motion.div>
+              );
+            })}
+          </>
         )}
-      </AnimatePresence>
-    </div>
-  );
-}
-
-function PostItemSheet({ open, onClose, currentUser }) {
-  const blank = {
-    name: "",
-    email: "",
-    phone: "",
-    type: "",
-    category: "",
-    item: "",
-    description: "",
-    location: "",
-    lat: null,
-    lon: null,
-    date: "",
-  };
-  const [form, setForm] = useState(blank);
-  const [photoFile, setPhotoFile] = useState(null);
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState("");
-
-  // Geolocation auto-detect state
-  const [gpsLoading, setGpsLoading] = useState(false);
-  const [gpsError, setGpsError] = useState("");
-  const gpsAttemptedRef = useRef(false);
-
-  useEffect(() => {
-    if (open && currentUser) {
-      setForm((f) => ({ ...f, email: f.email || currentUser.email || "" }));
-    }
-  }, [open, currentUser]);
-
-  // Reset the one-shot auto-detect flag when the sheet closes so the
-  // next open can auto-detect again if the location field is empty.
-  useEffect(() => {
-    if (!open) {
-      gpsAttemptedRef.current = false;
-      setGpsError("");
-      setGpsLoading(false);
-    }
-  }, [open]);
-
-  const handleUseCurrentLocation = useCallback(async () => {
-    if (!navigator.geolocation) {
-      setGpsError("Geolocation isn't supported by this browser");
-      return;
-    }
-    setGpsError("");
-    setGpsLoading(true);
-    navigator.geolocation.getCurrentPosition(
-      async (pos) => {
-        const lat = pos.coords.latitude;
-        const lon = pos.coords.longitude;
-        let label;
-        try {
-          const result = await reverseGeocode(lat, lon);
-          label = shortAddressLabel(result, lat, lon);
-        } catch {
-          label = shortAddressLabel(null, lat, lon);
-        }
-        setForm((f) => ({ ...f, location: label, lat, lon }));
-        setGpsLoading(false);
-      },
-      (err) => {
-        const msg =
-          err?.code === 1
-            ? "Location permission denied — type a place below instead"
-            : err?.code === 2
-              ? "Location unavailable — type a place below instead"
-              : err?.code === 3
-                ? "Location request timed out — try again or type below"
-                : "Couldn't get your location — type a place below instead";
-        setGpsError(msg);
-        setGpsLoading(false);
-      },
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 },
-    );
-  }, []);
-
-  // Auto-detect once when the sheet opens, only if the location field
-  // is still empty (so we don't overwrite a value the user typed).
-  useEffect(() => {
-    if (!open || gpsAttemptedRef.current) return;
-    if (form.location && form.location.trim()) return;
-    if (typeof navigator === "undefined" || !navigator.geolocation) return;
-    gpsAttemptedRef.current = true;
-    handleUseCurrentLocation();
-  }, [open, form.location, handleUseCurrentLocation]);
-
-  const update = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
-
-  const handleSubmit = async () => {
-    setError("");
-    const required = [
-      "name",
-      "email",
-      "phone",
-      "type",
-      "category",
-      "item",
-      "location",
-      "date",
-    ];
-    for (const k of required) {
-      if (!form[k]) {
-        setError(`Missing required field: ${k}`);
-        return;
-      }
-    }
-    setSubmitting(true);
-    try {
-      let photoBase64 = null;
-      if (photoFile) {
-        photoBase64 = await new Promise((resolve, reject) => {
-          const r = new FileReader();
-          r.onload = () => resolve(r.result);
-          r.onerror = reject;
-          r.readAsDataURL(photoFile);
-        });
-      }
-      await addDoc(collection(db, "items"), {
-        name: form.name,
-        email: form.email,
-        phone: form.phone,
-        type: form.type,
-        item: form.item.toLowerCase(),
-        itemOriginal: form.item,
-        description: form.description,
-        location: form.location.toLowerCase(),
-        locationOriginal: form.location,
-        lat:
-          typeof form.lat === "number" && Number.isFinite(form.lat)
-            ? form.lat
-            : null,
-        lon:
-          typeof form.lon === "number" && Number.isFinite(form.lon)
-            ? form.lon
-            : null,
-        date: form.date,
-        category: form.category,
-        userId: currentUser ? currentUser.uid : "anonymous",
-        photoData: photoBase64,
-        createdAt: serverTimestamp(),
-        viewed: false,
-        matched: false,
-      });
-      setForm({ ...blank, email: currentUser?.email || "" });
-      setPhotoFile(null);
-      onClose();
-    } catch (e) {
-      setError(e.message || "Failed to post item");
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <AnimatePresence>
-      {open && (
-        <>
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            onClick={onClose}
-            className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50"
-          />
-          <motion.aside
-            initial={{ x: "100%" }}
-            animate={{ x: 0 }}
-            exit={{ x: "100%" }}
-            transition={{ type: "spring", damping: 30, stiffness: 240 }}
-            className="fixed top-0 right-0 bottom-0 w-full sm:w-[480px] z-50 overflow-y-auto"
-          >
-            <div className="tn-glass-strong h-full p-6 sm:p-8 border-l border-white/[0.08]">
-              <div className="flex items-start justify-between mb-6">
-                <div>
-                  <div className="text-[10px] uppercase tracking-[0.22em] text-cyan-400 font-mono mb-1">
-                    New Report
-                  </div>
-                  <h2 className="text-2xl font-semibold tracking-tight">
-                    Submit to Network
-                  </h2>
-                  <p className="text-xs text-slate-400 mt-1">
-                    All fields are encrypted in transit.
-                  </p>
-                </div>
-                <button
-                  onClick={onClose}
-                  className="tn-btn tn-btn-ghost p-2 -mr-1 rounded-lg"
-                  aria-label="Close"
-                >
-                  <Icon.X />
-                </button>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <Field
-                  label="Your Name"
-                  v={form.name}
-                  onChange={update("name")}
-                  placeholder="Full name"
-                />
-                <Field
-                  label="Email"
-                  v={form.email}
-                  onChange={update("email")}
-                  placeholder="you@example.com"
-                  type="email"
-                />
-                <Field
-                  label="Phone"
-                  v={form.phone}
-                  onChange={update("phone")}
-                  placeholder="+1 (555) 000-0000"
-                  type="tel"
-                />
-                <Field
-                  label="Date"
-                  v={form.date}
-                  onChange={update("date")}
-                  type="date"
-                />
-                <Field
-                  label="Item Type"
-                  v={form.type}
-                  onChange={update("type")}
-                  as="select"
-                >
-                  <option value="">Select…</option>
-                  <option value="lost">Lost</option>
-                  <option value="found">Found</option>
-                </Field>
-                <Field
-                  label="Category"
-                  v={form.category}
-                  onChange={update("category")}
-                  as="select"
-                >
-                  <option value="">Select…</option>
-                  {CATEGORIES.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
-                </Field>
-                <Field
-                  label="Item Name"
-                  v={form.item}
-                  onChange={update("item")}
-                  placeholder="e.g., AirPods Pro, Student ID"
-                  full
-                />
-
-                <div className="sm:col-span-2">
-                  <div className="flex items-center justify-between mb-1.5 gap-2">
-                    <label className="block text-[10px] uppercase tracking-[0.18em] text-slate-400 font-mono">
-                      Location
-                    </label>
-                    <button
-                      type="button"
-                      onClick={handleUseCurrentLocation}
-                      disabled={gpsLoading}
-                      className={cn(
-                        "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[10px] font-mono uppercase tracking-wider transition-colors disabled:opacity-70",
-                        Number.isFinite(form.lat) && Number.isFinite(form.lon)
-                          ? "bg-cyan-400/15 border-cyan-400/40 text-cyan-200 shadow-[0_0_10px_rgba(34,211,238,0.22)]"
-                          : "bg-white/[0.04] border-white/[0.08] text-slate-300 hover:text-white hover:border-cyan-400/40",
-                      )}
-                      title="Auto-fill from your device's location"
-                    >
-                      {gpsLoading ? (
-                        <>
-                          <span className="w-2.5 h-2.5 rounded-full border-2 border-cyan-400/30 border-t-cyan-400 animate-spin" />
-                          detecting…
-                        </>
-                      ) : (
-                        <>📍 Use current location</>
-                      )}
-                    </button>
-                  </div>
-                  <LocationAutocomplete
-                    value={form.location}
-                    onChange={(v) =>
-                      setForm((f) => ({
-                        ...f,
-                        location: v,
-                        // typing again invalidates locked coords
-                        lat: null,
-                        lon: null,
-                      }))
-                    }
-                    onSelect={(sel) =>
-                      setForm((f) => ({
-                        ...f,
-                        location: sel.name,
-                        lat: sel.lat,
-                        lon: sel.lon,
-                      }))
-                    }
-                    placeholder="Try Hyd, HITEC City, JFK Airport…"
-                  />
-                  {gpsError ? (
-                    <div className="mt-1.5 text-[10px] font-mono text-rose-300 flex items-center gap-1.5">
-                      <span className="w-1.5 h-1.5 rounded-full bg-rose-400" />
-                      {gpsError}
-                    </div>
-                  ) : Number.isFinite(form.lat) && Number.isFinite(form.lon) ? (
-                    <div className="mt-1.5 inline-flex items-center gap-1.5 text-[10px] font-mono text-cyan-300">
-                      <span className="relative flex w-1.5 h-1.5">
-                        <span className="absolute inset-0 rounded-full bg-cyan-400 animate-ping opacity-70" />
-                        <span className="relative w-1.5 h-1.5 rounded-full bg-cyan-400" />
-                      </span>
-                      Coords locked · {form.lat.toFixed(4)}°,{" "}
-                      {form.lon.toFixed(4)}°
-                    </div>
-                  ) : gpsLoading ? (
-                    <div className="mt-1.5 text-[10px] font-mono text-cyan-300/80 flex items-center gap-1.5">
-                      <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
-                      Reading GPS · reverse-geocoding…
-                    </div>
-                  ) : (
-                    <div className="mt-1.5 text-[10px] font-mono text-slate-500">
-                      Tap "Use current location" or pick a suggestion above.
-                    </div>
-                  )}
-                </div>
-
-                <Field
-                  label="Description"
-                  v={form.description}
-                  onChange={update("description")}
-                  placeholder="Color, brand, identifying features…"
-                  as="textarea"
-                  full
-                />
-                <div className="sm:col-span-2">
-                  <label className="block text-[10px] uppercase tracking-[0.18em] text-slate-400 font-mono mb-1.5">
-                    Photo (optional)
-                  </label>
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={(e) => setPhotoFile(e.target.files[0] || null)}
-                    className="tn-input file:mr-3 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:bg-cyan-400/10 file:text-cyan-300 file:font-mono file:text-xs file:cursor-pointer cursor-pointer"
-                  />
-                  {photoFile && (
-                    <div className="text-[11px] text-slate-500 mt-1.5 font-mono truncate">
-                      → {photoFile.name}
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {error && (
-                <div className="mt-4 px-3 py-2 rounded-lg bg-rose-500/10 border border-rose-500/30 text-xs text-rose-300">
-                  {error}
-                </div>
-              )}
-
-              <button
-                onClick={handleSubmit}
-                disabled={submitting}
-                className="tn-btn tn-btn-primary w-full mt-6 py-3 text-sm"
-              >
-                {submitting ? (
-                  "Transmitting…"
-                ) : (
-                  <>
-                    <Icon.Bolt />
-                    Submit to Network
-                  </>
-                )}
-              </button>
-            </div>
-          </motion.aside>
-        </>
-      )}
-    </AnimatePresence>
+      </Tilt>
+    </section>
   );
 }
 
 /* ================== AUTH MODAL ================== */
 
 function AuthModal({ open, onClose }) {
-  console.log("🎯 AuthModal component rendered with open:", open);
   const [tab, setTab] = useState("signin"); // Default to Sign in tab
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [verificationCode, setVerificationCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  const [step, setStep] = useState("credentials"); // "credentials" or "verification"
-  const [verificationCodeGenerated, setVerificationCodeGenerated] =
-    useState(null);
-
-  useEffect(() => {
-    console.log("🔄 Step changed to:", step);
-  }, [step]);
 
   useEffect(() => {
     if (!open) {
       setEmail("");
       setPassword("");
-      setVerificationCode("");
       setErr("");
-      setStep("credentials");
-      setVerificationCodeGenerated(null);
     }
   }, [open]);
 
-  const handleCredentialsSubmit = async () => {
+  const handleSubmit = async (e) => {
+    e.preventDefault();
     setErr("");
     if (!email || !password) {
       setErr("Email and password are required.");
@@ -4847,68 +2366,14 @@ function AuthModal({ open, onClose }) {
     }
     setBusy(true);
     try {
-      // Send verification code via EmailJS
-      await sendVerificationCode(email);
-      setStep("verification");
-      console.log("✅ Verification code sent to", email);
-    } catch (e) {
-      setErr(
-        e.message || "Failed to send verification code. Please try again.",
-      );
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleVerificationSubmit = async () => {
-    setErr("");
-    if (!verificationCode || verificationCode.length !== 6) {
-      setErr("Please enter a valid 6-digit code.");
-      return;
-    }
-    setBusy(true);
-    try {
-      // Verify the 2FA code first
-      await verifyCode(email, verificationCode);
-
-      // After 2FA passes, authenticate with Firebase
-      try {
-        if (tab === "signup") {
-          await createUserWithEmailAndPassword(auth, email, password);
-        } else {
-          await signInWithEmailAndPassword(auth, email, password);
-        }
-      } catch (authError) {
-        // If auth fails but 2FA passed, allow it (for demo)
-        console.warn("Firebase auth note:", authError.message);
+      if (tab === "signup") {
+        await createUserWithEmailAndPassword(auth, email, password);
+      } else {
+        await signInWithEmailAndPassword(auth, email, password);
       }
-
-      // Clean up and close
-      await clearVerificationCode(email);
       onClose();
-    } catch (e) {
-      setErr(e.message || "Verification failed.");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleBackToCredentials = () => {
-    setStep("credentials");
-    setVerificationCode("");
-    setErr("");
-  };
-
-  const handleResendCode = async () => {
-    setErr("");
-    setBusy(true);
-    try {
-      const code = await sendVerificationCode(email);
-      setVerificationCodeGenerated(code);
-      setErr("");
-      console.log(`✅ New verification code sent to ${email}. Code: ${code}`);
-    } catch (e) {
-      setErr(e.message || "Failed to resend code.");
+    } catch (e2) {
+      setErr(e2.message || "Authentication failed. Please try again.");
     } finally {
       setBusy(false);
     }
@@ -4921,7 +2386,7 @@ function AuthModal({ open, onClose }) {
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80"
           onClick={onClose}
         >
           <motion.div
@@ -4930,289 +2395,91 @@ function AuthModal({ open, onClose }) {
             exit={{ y: 20, opacity: 0, scale: 0.96 }}
             transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
             onClick={(e) => e.stopPropagation()}
-            className="tn-glass-strong rounded-3xl w-full max-w-md p-6 sm:p-8 relative"
+            className="w-full max-w-md"
           >
-            <button
-              onClick={onClose}
-              className="absolute top-4 right-4 tn-btn tn-btn-ghost p-2 rounded-lg"
-              aria-label="Close"
-            >
-              <Icon.X />
-            </button>
+            <Tilt max={4} className="tn-panel p-6 sm:p-8">
+              <button
+                onClick={onClose}
+                className="absolute top-3 right-3 p-2 text-ch-mute hover:text-white"
+                aria-label="Close"
+              >
+                <Icon.X />
+              </button>
 
-            {console.log("🎨 Modal rendering with step:", step)}
-            {step === "credentials" ? (
-              <>
-                <div className="text-[10px] uppercase tracking-[0.22em] text-cyan-400 font-mono mb-1">
-                  Network Access
+              <div className="tn-z1 tn-label tn-label-acc mb-2">
+                // agency credentials
+              </div>
+              <h2 className="tn-z2 tn-heading text-2xl mb-5">
+                {tab === "signup" ? "Enrol" : "Authenticate"}
+              </h2>
+
+              <div className="tn-z1 flex gap-1 mb-5">
+                {["signup", "signin"].map((t) => (
+                  <button
+                    key={t}
+                    type="button"
+                    onClick={() => setTab(t)}
+                    className={cn(
+                      "tn-hud flex-1 !py-2.5",
+                      tab === t && "tn-hud-on",
+                    )}
+                  >
+                    {t === "signup" ? "Sign up" : "Sign in"}
+                  </button>
+                ))}
+              </div>
+
+              <form onSubmit={handleSubmit} className="tn-z2 tn-3d space-y-3">
+                <div>
+                  <label className="tn-label block mb-1.5" htmlFor="auth-email">
+                    Email
+                  </label>
+                  <input
+                    id="auth-email"
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="you@example.com"
+                    autoComplete="email"
+                    className="tn-input"
+                  />
                 </div>
-                <h2 className="text-2xl font-semibold tracking-tight mb-1">
-                  {tab === "signup" ? "Create your node" : "Sign in"}
-                </h2>
-                <p className="text-sm text-slate-400 mb-6">
-                  Authenticate to join the recovery network.
-                </p>
-
-                <div className="flex p-1 mb-5 rounded-xl bg-white/[0.04] border border-white/[0.06]">
-                  {["signup", "signin"].map((t) => (
-                    <button
-                      key={t}
-                      onClick={() => setTab(t)}
-                      className={cn(
-                        "flex-1 py-2 rounded-lg text-sm font-medium transition-all",
-                        tab === t
-                          ? "bg-gradient-to-br from-cyan-500/25 to-purple-500/25 text-white shadow-[0_0_18px_rgba(34,211,238,0.18)] border border-white/[0.08]"
-                          : "text-slate-400 hover:text-slate-200",
-                      )}
-                    >
-                      {t === "signup" ? "Sign up" : "Sign in"}
-                    </button>
-                  ))}
-                </div>
-
-                <div className="space-y-3">
-                  <div>
-                    <label className="block text-[10px] uppercase tracking-[0.18em] text-slate-400 font-mono mb-1.5">
-                      Email
-                    </label>
-                    <input
-                      type="email"
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      placeholder="you@example.com"
-                      className="tn-input"
-                      onKeyDown={(e) =>
-                        e.key === "Enter" && handleCredentialsSubmit()
-                      }
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] uppercase tracking-[0.18em] text-slate-400 font-mono mb-1.5">
-                      Password
-                    </label>
-                    <input
-                      type="password"
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      placeholder="••••••••"
-                      className="tn-input"
-                      onKeyDown={(e) =>
-                        e.key === "Enter" && handleCredentialsSubmit()
-                      }
-                    />
-                  </div>
+                <div>
+                  <label className="tn-label block mb-1.5" htmlFor="auth-password">
+                    Password
+                  </label>
+                  <input
+                    id="auth-password"
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="••••••••"
+                    autoComplete={
+                      tab === "signup" ? "new-password" : "current-password"
+                    }
+                    className="tn-input"
+                  />
                 </div>
 
                 {err && (
-                  <div className="mt-3 px-3 py-2 rounded-lg bg-rose-500/10 border border-rose-500/30 text-xs text-rose-300">
-                    {err}
-                  </div>
+                  <div className="font-mono text-xs text-ch-danger">{err}</div>
                 )}
 
-                <button
-                  onClick={() => {
-                    console.log(
-                      "📌 Button clicked! Current tab:",
-                      tab,
-                      "Current step:",
-                      step,
-                    );
-                    handleCredentialsSubmit();
-                  }}
+                <Tilt
+                  as="button"
+                  max={10}
+                  type="submit"
                   disabled={busy}
-                  className="tn-btn tn-btn-primary w-full mt-5 py-3 text-sm"
+                  className="tn-btn tn-btn-primary w-full py-3.5 !mt-5"
                 >
                   {busy
                     ? "Authenticating…"
                     : tab === "signup"
                       ? "Create account"
                       : "Sign in"}
-                </button>
-              </>
-            ) : (
-              <>
-                <div className="text-[10px] uppercase tracking-[0.22em] text-purple-400 font-mono mb-1">
-                  Security Check
-                </div>
-                <h2 className="text-2xl font-semibold tracking-tight mb-1">
-                  Verify Your Identity
-                </h2>
-                <p className="text-sm text-slate-400 mb-2">
-                  Enter the 6-digit code sent to:
-                </p>
-                <p className="text-sm text-cyan-300 font-mono mb-6">{email}</p>
-
-                <div>
-                  <label className="block text-[10px] uppercase tracking-[0.18em] text-slate-400 font-mono mb-1.5">
-                    Verification Code
-                  </label>
-                  <input
-                    type="text"
-                    maxLength="6"
-                    value={verificationCode}
-                    onChange={(e) => {
-                      const val = e.target.value
-                        .replace(/[^0-9]/g, "")
-                        .slice(0, 6);
-                      setVerificationCode(val);
-                    }}
-                    placeholder="000000"
-                    className="tn-input text-center tracking-widest text-lg font-mono"
-                    onKeyDown={(e) =>
-                      e.key === "Enter" && handleVerificationSubmit()
-                    }
-                    autoFocus
-                  />
-                </div>
-
-                <div className="mt-4 p-3 rounded-lg bg-blue-500/10 border border-blue-500/30 text-xs text-blue-300">
-                  <strong>🔐 DEMO MODE:</strong>
-                  <div className="mt-1.5 space-y-1 text-[11px]">
-                    <div>✓ Open Browser Console (F12 or Cmd+Option+J)</div>
-                    <div>
-                      ✓ Look for blue code box:{" "}
-                      <span className="font-mono text-cyan-300">
-                        Code: 123456
-                      </span>
-                    </div>
-                    <div>✓ Copy & paste the 6-digit code above</div>
-                    <div className="pt-1 text-blue-400">
-                      For production, configure SendGrid in CLERK_SETUP.md
-                    </div>
-                  </div>
-                </div>
-
-                {err && (
-                  <div className="mt-3 px-3 py-2 rounded-lg bg-rose-500/10 border border-rose-500/30 text-xs text-rose-300">
-                    {err}
-                  </div>
-                )}
-
-                <button
-                  onClick={handleVerificationSubmit}
-                  disabled={busy}
-                  className="tn-btn tn-btn-primary w-full mt-5 py-3 text-sm"
-                >
-                  {busy ? "Verifying…" : "Verify Code"}
-                </button>
-
-                <button
-                  onClick={handleResendCode}
-                  disabled={busy}
-                  className="tn-btn tn-btn-ghost w-full mt-2 py-2 text-xs"
-                >
-                  Resend Code
-                </button>
-
-                <button
-                  onClick={handleBackToCredentials}
-                  disabled={busy}
-                  className="tn-btn tn-btn-ghost w-full mt-1 py-2 text-xs text-slate-500"
-                >
-                  Back to Sign In
-                </button>
-              </>
-            )}
-          </motion.div>
-        </motion.div>
-      )}
-    </AnimatePresence>
-  );
-}
-
-/* ================== CONTACT MODAL ================== */
-
-function ContactRow({ label, value, href }) {
-  return (
-    <div className="flex items-center justify-between gap-3 p-3 rounded-xl bg-white/[0.03] border border-white/[0.06]">
-      <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500 font-mono">
-        {label}
-      </div>
-      {href ? (
-        <a
-          href={href}
-          className="text-sm text-cyan-300 hover:text-cyan-200 truncate"
-        >
-          {value || "—"}
-        </a>
-      ) : (
-        <div className="text-sm text-slate-100 truncate">{value || "—"}</div>
-      )}
-    </div>
-  );
-}
-
-function ContactModal({ item, onClose }) {
-  const [copied, setCopied] = useState(false);
-
-  const copy = async () => {
-    if (!item) return;
-    const text = `Name: ${item.name || ""}\nEmail: ${item.email || ""}\nPhone: ${item.phone || ""}`;
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {}
-  };
-
-  return (
-    <AnimatePresence>
-      {item && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
-          onClick={onClose}
-        >
-          <motion.div
-            initial={{ y: 20, opacity: 0, scale: 0.96 }}
-            animate={{ y: 0, opacity: 1, scale: 1 }}
-            exit={{ y: 20, opacity: 0, scale: 0.96 }}
-            transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
-            onClick={(e) => e.stopPropagation()}
-            className="tn-glass-strong rounded-3xl w-full max-w-md p-6 sm:p-8 relative"
-          >
-            <button
-              onClick={onClose}
-              className="absolute top-4 right-4 tn-btn tn-btn-ghost p-2 rounded-lg"
-              aria-label="Close"
-            >
-              <Icon.X />
-            </button>
-            <div className="text-[10px] uppercase tracking-[0.22em] text-purple-400 font-mono mb-1">
-              Secure Channel
-            </div>
-            <h2 className="text-2xl font-semibold tracking-tight mb-1">
-              Contact Information
-            </h2>
-            <p className="text-sm text-slate-400 mb-5">
-              Linked to:{" "}
-              <span className="text-slate-200">
-                {item.itemOriginal || item.item || "—"}
-              </span>
-            </p>
-
-            <div className="space-y-2.5">
-              <ContactRow label="Name" value={item.name} />
-              <ContactRow
-                label="Email"
-                value={item.email}
-                href={item.email ? `mailto:${item.email}` : null}
-              />
-              <ContactRow
-                label="Phone"
-                value={item.phone}
-                href={item.phone ? `tel:${item.phone}` : null}
-              />
-            </div>
-
-            <button
-              onClick={copy}
-              className="tn-btn tn-btn-primary w-full mt-5 py-2.5"
-            >
-              {copied ? "✓ Copied to clipboard" : "Copy Contact"}
-            </button>
+                </Tilt>
+              </form>
+            </Tilt>
           </motion.div>
         </motion.div>
       )}
@@ -5224,23 +2491,15 @@ function ContactModal({ item, onClose }) {
 
 function Footer() {
   return (
-    <footer className="px-3 sm:px-6 lg:px-10 py-8">
-      <div className="tn-glass rounded-2xl px-5 py-4 flex flex-col sm:flex-row items-center justify-between gap-3">
-        <div className="text-xs text-slate-500 font-mono flex items-center gap-3">
-          <span className="tn-gradient-text font-semibold text-sm">
-            TraceNet AI
-          </span>
-          <span className="opacity-30">·</span>
-          <span>Geo-Intelligent Recovery Network</span>
-        </div>
-        <div className="flex items-center gap-3 text-[10px] text-slate-600 font-mono uppercase tracking-[0.18em]">
-          <span className="flex items-center gap-1.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)]" />
-            Secure
-          </span>
-          <span className="opacity-30">•</span>
-          <span>Powered by Firebase</span>
-        </div>
+    <footer className="px-3 sm:px-6 lg:px-10 py-10">
+      <div className="flex flex-col sm:flex-row items-center justify-between gap-3 border-t border-ch-acc/15 pt-5 tn-label">
+        <span>
+          Baker_Street<span className="text-ch-acc">//</span>Hunt
+        </span>
+        <span className="flex items-center gap-2">
+          <span className="tn-dot" />
+          the game is afoot · powered by firebase
+        </span>
       </div>
     </footer>
   );
@@ -5248,1281 +2507,174 @@ function Footer() {
 
 /* ================== ROOT APP ================== */
 
-/* ================== EDIT ITEM SHEET ================== */
-
-function EditItemSheet({ item, onClose }) {
-  const [form, setForm] = useState(null);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-
-  useEffect(() => {
-    if (item) {
-      setForm({
-        item: item.itemOriginal || item.item || "",
-        description: item.description || "",
-        category: item.category || "",
-        location: item.locationOriginal || item.location || "",
-        lat: typeof item.lat === "number" ? item.lat : null,
-        lon: typeof item.lon === "number" ? item.lon : null,
-        date: item.date || "",
-      });
-      setErr("");
-    } else {
-      setForm(null);
-    }
-  }, [item]);
-
-  const update = (k) =>
-    form ? (e) => setForm((f) => ({ ...f, [k]: e.target.value })) : () => {};
-
-  const handleSave = async () => {
-    setErr("");
-    if (!form.item.trim() || !form.location.trim() || !form.date) {
-      setErr("Item name, location, and date are required.");
-      return;
-    }
-    setBusy(true);
-    try {
-      await updateDoc(doc(db, "items", item.id), {
-        item: form.item.toLowerCase(),
-        itemOriginal: form.item,
-        description: form.description,
-        category: form.category,
-        location: form.location.toLowerCase(),
-        locationOriginal: form.location,
-        lat: Number.isFinite(form.lat) ? form.lat : null,
-        lon: Number.isFinite(form.lon) ? form.lon : null,
-        date: form.date,
-        updatedAt: serverTimestamp(),
-      });
-      onClose();
-    } catch (e) {
-      setErr(e.message || "Failed to save changes.");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <AnimatePresence>
-      {item && form && (
-        <>
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            onClick={onClose}
-            className="fixed inset-0 bg-black/70 backdrop-blur-sm z-[68]"
-          />
-          <motion.aside
-            initial={{ x: "100%" }}
-            animate={{ x: 0 }}
-            exit={{ x: "100%" }}
-            transition={{ type: "spring", damping: 30, stiffness: 240 }}
-            className="fixed top-0 right-0 bottom-0 w-full sm:w-[480px] z-[69] overflow-y-auto"
-          >
-            <div className="tn-glass-strong h-full p-6 sm:p-8 border-l border-white/[0.08]">
-              <div className="flex items-start justify-between mb-6">
-                <div>
-                  <div className="text-[10px] uppercase tracking-[0.22em] text-purple-400 font-mono mb-1">
-                    Edit · Item #{item.id?.slice(0, 6)}
-                  </div>
-                  <h2 className="text-2xl font-semibold tracking-tight">
-                    Update report
-                  </h2>
-                  <p className="text-xs text-slate-400 mt-1">
-                    Fix typos, add details, or relocate the pin.
-                  </p>
-                </div>
-                <button
-                  onClick={onClose}
-                  className="tn-btn tn-btn-ghost p-2 -mr-1 rounded-lg"
-                  aria-label="Close"
-                >
-                  <Icon.X />
-                </button>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <Field
-                  label="Item Name"
-                  v={form.item}
-                  onChange={update("item")}
-                  placeholder="e.g., AirPods Pro"
-                  full
-                />
-                <Field
-                  label="Date"
-                  v={form.date}
-                  onChange={update("date")}
-                  type="date"
-                />
-                <Field
-                  label="Category"
-                  v={form.category}
-                  onChange={update("category")}
-                  as="select"
-                >
-                  <option value="">Select…</option>
-                  {CATEGORIES.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
-                </Field>
-
-                <div className="sm:col-span-2">
-                  <label className="block text-[10px] uppercase tracking-[0.18em] text-slate-400 font-mono mb-1.5">
-                    Location
-                  </label>
-                  <LocationAutocomplete
-                    value={form.location}
-                    onChange={(v) =>
-                      setForm((f) => ({
-                        ...f,
-                        location: v,
-                        lat: null,
-                        lon: null,
-                      }))
-                    }
-                    onSelect={(sel) =>
-                      setForm((f) => ({
-                        ...f,
-                        location: sel.name,
-                        lat: sel.lat,
-                        lon: sel.lon,
-                      }))
-                    }
-                    placeholder="Search a place…"
-                  />
-                  {Number.isFinite(form.lat) && Number.isFinite(form.lon) ? (
-                    <div className="mt-1.5 text-[10px] font-mono text-cyan-300">
-                      Coords locked · {form.lat.toFixed(4)}°,{" "}
-                      {form.lon.toFixed(4)}°
-                    </div>
-                  ) : (
-                    <div className="mt-1.5 text-[10px] font-mono text-slate-500">
-                      {item.lat
-                        ? "Coords cleared — pick a suggestion to re-attach precise lat/lon."
-                        : "Pick a suggestion to attach precise coordinates."}
-                    </div>
-                  )}
-                </div>
-
-                <Field
-                  label="Description"
-                  v={form.description}
-                  onChange={update("description")}
-                  placeholder="Color, brand, identifying features…"
-                  as="textarea"
-                  full
-                />
-              </div>
-
-              {err && (
-                <div className="mt-4 px-3 py-2 rounded-lg bg-rose-500/10 border border-rose-500/30 text-xs text-rose-300">
-                  {err}
-                </div>
-              )}
-
-              <div className="mt-6 flex items-center gap-2">
-                <button
-                  onClick={onClose}
-                  className="tn-btn tn-btn-ghost flex-1 py-3 text-sm"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleSave}
-                  disabled={busy}
-                  className="tn-btn tn-btn-primary flex-1 py-3 text-sm"
-                >
-                  {busy ? (
-                    "Saving…"
-                  ) : (
-                    <>
-                      <Icon.Bolt />
-                      Save changes
-                    </>
-                  )}
-                </button>
-              </div>
-              <div className="mt-3 text-[10px] font-mono text-slate-600 uppercase tracking-wider text-center">
-                Changes sync to Firebase in real time
-              </div>
-            </div>
-          </motion.aside>
-        </>
-      )}
-    </AnimatePresence>
-  );
-}
-
-/* ================== MATCH PREVIEW MODAL ================== */
-
-function MatchPreviewModal({ item, allItems, fingerprints, onClose }) {
-  const matches = useMemo(() => {
-    if (!item || !Array.isArray(allItems)) return [];
-    const myType = (item.type || "").toLowerCase();
-    const oppType =
-      myType === "lost" ? "found" : myType === "found" ? "lost" : null;
-    if (!oppType) return [];
-    const out = [];
-    for (const o of allItems) {
-      if (o.id === item.id) continue;
-      if ((o.type || "").toLowerCase() !== oppType) continue;
-      const distance = itemDistanceMeters(item, o);
-      const imgSim = imageSimilarity(
-        fingerprints?.[item.id],
-        fingerprints?.[o.id],
-      );
-      const lost = myType === "lost" ? item : o;
-      const found = myType === "found" ? item : o;
-      const score = advancedMatchScore({ lost, found, imgSim, distance });
-      if (score > 0.1) out.push({ other: o, score, imgSim, distance });
-    }
-    out.sort((a, b) => b.score - a.score);
-    return out.slice(0, 5);
-  }, [item, allItems, fingerprints]);
-
-  return (
-    <AnimatePresence>
-      {item && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          className="fixed inset-0 z-[72] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
-          onClick={onClose}
-        >
-          <motion.div
-            initial={{ y: 20, opacity: 0, scale: 0.96 }}
-            animate={{ y: 0, opacity: 1, scale: 1 }}
-            exit={{ y: 20, opacity: 0, scale: 0.96 }}
-            transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
-            onClick={(e) => e.stopPropagation()}
-            className="tn-glass-strong rounded-3xl w-full max-w-lg max-h-[88vh] overflow-y-auto relative"
-          >
-            <div className="pointer-events-none absolute inset-0 rounded-3xl tn-grad-border opacity-70" />
-            <div className="relative p-5 sm:p-6">
-              <div className="flex items-start justify-between mb-4">
-                <div className="min-w-0">
-                  <div className="text-[10px] uppercase tracking-[0.22em] text-purple-400 font-mono mb-1">
-                    Smart Matches
-                  </div>
-                  <h2 className="text-xl font-semibold tracking-tight text-slate-100 truncate">
-                    {item.itemOriginal || item.item || "Untitled"}
-                  </h2>
-                  <p className="text-xs text-slate-400 mt-1">
-                    Top probable links with{" "}
-                    {item.type === "lost" ? "Found" : "Lost"} reports.
-                  </p>
-                </div>
-                <button
-                  onClick={onClose}
-                  className="tn-btn tn-btn-ghost p-2 rounded-lg shrink-0 ml-2"
-                  aria-label="Close"
-                >
-                  <Icon.X />
-                </button>
-              </div>
-
-              {matches.length === 0 ? (
-                <div className="text-center py-10">
-                  <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-white/[0.03] border border-white/[0.06] mb-3 text-slate-500">
-                    <Icon.Sparkles />
-                  </div>
-                  <p className="text-slate-200 text-sm font-medium">
-                    No matches yet
-                  </p>
-                  <p className="text-slate-500 text-xs mt-1">
-                    Matches surface when an opposite-type item shares enough
-                    title, description, location, or image signal.
-                  </p>
-                </div>
-              ) : (
-                <div className="space-y-2.5">
-                  {matches.map((m, idx) => (
-                    <MatchPreviewRow
-                      key={m.other.id}
-                      idx={idx}
-                      myItem={item}
-                      otherItem={m.other}
-                      score={m.score}
-                      imgSim={m.imgSim}
-                      distance={m.distance}
-                      allItems={allItems}
-                    />
-                  ))}
-                </div>
-              )}
-            </div>
-          </motion.div>
-        </motion.div>
-      )}
-    </AnimatePresence>
-  );
-}
-
-function MatchPreviewRow({
-  idx,
-  myItem,
-  otherItem,
-  score,
-  imgSim,
-  distance,
-  allItems,
-}) {
-  const myAccent = myItem.type === "lost" ? "#fb7185" : "#34d399";
-  const otherAccent = otherItem.type === "lost" ? "#fb7185" : "#34d399";
-  const pct = Math.round(score * 100);
-  const imgPct = imgSim != null ? Math.round(imgSim * 100) : null;
-  const distLabel = formatDistance(distance);
-  const otherTrust = computeTrustScore(otherItem, allItems);
-  const fraudColor =
-    otherTrust >= 70 ? "#34d399" : otherTrust >= 45 ? "#fbbf24" : "#94a3b8";
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, x: -8 }}
-      animate={{ opacity: 1, x: 0 }}
-      transition={{ delay: idx * 0.05, duration: 0.3 }}
-      className="rounded-2xl bg-white/[0.025] border border-white/[0.06] p-3 hover:border-purple-400/35 transition-colors"
-    >
-      <div className="flex items-center gap-3">
-        <div className="tn-match-thumb" style={{ "--c": myAccent }}>
-          {myItem.photoData ? (
-            <img src={myItem.photoData} alt="" />
-          ) : (
-            <div className="tn-match-thumb-empty">
-              <span>{CAT_GLYPH[myItem.category] || "📦"}</span>
-            </div>
-          )}
-          <div className="tn-match-thumb-tag">
-            {myItem.type === "lost" ? "LOST" : "FOUND"}
-          </div>
-        </div>
-        <span className="tn-match-arrow">↔</span>
-        <div className="tn-match-thumb" style={{ "--c": otherAccent }}>
-          {otherItem.photoData ? (
-            <img src={otherItem.photoData} alt="" />
-          ) : (
-            <div className="tn-match-thumb-empty">
-              <span>{CAT_GLYPH[otherItem.category] || "📦"}</span>
-            </div>
-          )}
-          <div className="tn-match-thumb-tag">
-            {otherItem.type === "lost" ? "LOST" : "FOUND"}
-          </div>
-        </div>
-        <div className="flex-1 min-w-0 ml-1">
-          <div className="text-sm font-semibold text-slate-100 truncate">
-            {otherItem.itemOriginal || otherItem.item || "Untitled"}
-          </div>
-          <div className="text-[11px] text-slate-400 truncate flex items-center gap-1 mt-0.5">
-            <Icon.Pin />
-            {otherItem.locationOriginal || otherItem.location || "—"}
-          </div>
-        </div>
-        <div className="text-right shrink-0">
-          <div className="text-xl font-mono font-bold tabular-nums text-slate-100 leading-none">
-            {pct}%
-          </div>
-          <div className="text-[8.5px] font-mono text-purple-300 uppercase tracking-[0.12em] mt-0.5">
-            match
-          </div>
-        </div>
-      </div>
-      <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-        {imgPct != null && (
-          <span
-            className="tn-match-stat"
-            style={{
-              "--c":
-                imgPct >= 70 ? "#a855f7" : imgPct >= 40 ? "#22d3ee" : "#94a3b8",
-            }}
-          >
-            <Icon.Sparkles />
-            Img {imgPct}%
-          </span>
-        )}
-        {distLabel && (
-          <span className="tn-match-stat" style={{ "--c": "#22d3ee" }}>
-            <Icon.Pin />
-            {distLabel}
-          </span>
-        )}
-        <span
-          className="tn-match-stat"
-          style={{ "--c": fraudColor }}
-          title="TrustScore of the matching post"
-        >
-          <Icon.Shield />
-          Trust {otherTrust}
-        </span>
-      </div>
-    </motion.div>
-  );
-}
-
-/* ================== YOUR UPLOADS DASHBOARD ================== */
-
-function UploadStat({ label, value, accent }) {
-  return (
-    <div
-      className="tn-glass rounded-2xl px-4 py-3 flex flex-col gap-0.5 relative overflow-hidden"
-      style={{ "--c": accent }}
-    >
-      <span
-        className="absolute inset-x-0 top-0 h-px"
-        style={{
-          background: `linear-gradient(90deg, transparent, ${accent}, transparent)`,
-          opacity: 0.6,
-        }}
-      />
-      <div className="text-[10px] uppercase tracking-[0.18em] font-mono text-slate-500">
-        {label}
-      </div>
-      <div
-        className="text-2xl font-semibold font-mono tabular-nums"
-        style={{ color: accent }}
-      >
-        {value}
-      </div>
-    </div>
-  );
-}
-
-function UploadCard({
-  item,
-  trust,
-  recovered,
-  pending,
-  approved,
-  rejected = 0,
-  totalClaims = 0,
-  matchInfo,
-  scanning = false,
-  onEdit,
-  onDelete,
-  onOpenChat,
-  onViewMatches,
-  idx,
-}) {
-  const status = recovered
-    ? "recovered"
-    : (item.type || "").toString().trim().toLowerCase() === "lost"
-      ? "lost"
-      : "found";
-  const accent =
-    status === "recovered"
-      ? "#fbbf24"
-      : status === "lost"
-        ? "#fb7185"
-        : "#34d399";
-  const statusLabel =
-    status === "recovered" ? "RECOVERED" : status === "lost" ? "LOST" : "FOUND";
-  const trustGrad = `tn-trust-${(item.id || "x").replace(/[^a-zA-Z0-9_-]/g, "")}`;
-  const photoSrc = item.photoData;
-
-  // Match analytics — only render pills when each metric has signal.
-  const matchPct = matchInfo?.score ? Math.round(matchInfo.score * 100) : 0;
-  const imgPct =
-    matchInfo?.imgSim != null ? Math.round(matchInfo.imgSim * 100) : null;
-  const nearbyCount = matchInfo?.nearbyCount || 0;
-  const fraud = matchInfo?.fraud;
-  const fraudColor =
-    fraud?.level === "high"
-      ? "#fb7185"
-      : fraud?.level === "medium"
-        ? "#fbbf24"
-        : "#34d399";
-  const trustColor =
-    trust >= 70 ? "#34d399" : trust >= 45 ? "#fbbf24" : "#94a3b8";
-
-  const uploadedAt = item.createdAt || item.date;
-  const relTime = formatRelativeTime(uploadedAt);
-
-  return (
-    <motion.div
-      layout
-      initial={{ opacity: 0, y: 14 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -10 }}
-      transition={{ delay: Math.min(idx, 6) * 0.05, duration: 0.4 }}
-      className="tn-upload-card relative tn-glass rounded-2xl overflow-hidden"
-      style={{ "--accent": accent }}
-    >
-      <div className="tn-upload-glow" />
-
-      <div className="relative h-32 overflow-hidden">
-        {photoSrc ? (
-          <img src={photoSrc} alt="" className="w-full h-full object-cover" />
-        ) : (
-          <div
-            className="w-full h-full flex items-center justify-center text-5xl"
-            style={{
-              background: `linear-gradient(135deg, ${accent}28, rgba(8,10,22,0.7))`,
-            }}
-          >
-            <span style={{ opacity: 0.6 }}>
-              {CAT_GLYPH[item.category] || "📦"}
-            </span>
-          </div>
-        )}
-        <div className="absolute inset-0 bg-gradient-to-t from-[#0a0c1a] via-[#0a0c1a]/30 to-transparent" />
-        <span
-          className="absolute top-3 left-3 px-2 py-1 rounded-md text-[9.5px] font-mono font-bold uppercase tracking-[0.16em] border"
-          style={{
-            background: `${accent}26`,
-            color: accent,
-            borderColor: `${accent}66`,
-            boxShadow: `0 0 12px ${accent}55`,
-          }}
-        >
-          {statusLabel}
-        </span>
-        {item.category && (
-          <span className="absolute top-3 right-3 px-2 py-1 rounded-md text-[9.5px] font-mono uppercase tracking-[0.12em] bg-black/55 backdrop-blur text-slate-200 border border-white/[0.08]">
-            {item.category}
-          </span>
-        )}
-      </div>
-
-      <div className="p-4 space-y-3">
-        <div>
-          <div className="flex items-start justify-between gap-2">
-            <div className="text-base font-semibold text-slate-50 leading-tight tn-line-clamp-1 flex-1">
-              {item.itemOriginal || item.item || "Untitled"}
-            </div>
-            {relTime && (
-              <span className="shrink-0 text-[9.5px] font-mono uppercase tracking-[0.12em] text-slate-500">
-                ⏱ {relTime}
-              </span>
-            )}
-          </div>
-          <div className="text-[11px] text-slate-400 truncate flex items-center gap-1 mt-0.5">
-            <Icon.Pin />
-            {item.locationOriginal || item.location || "—"}
-          </div>
-          <div className="text-[10px] text-slate-500 font-mono mt-0.5">
-            {formatDate(item.date)}
-            {scanning && (
-              <span className="ml-2 text-purple-300/80">· scanning image…</span>
-            )}
-          </div>
-        </div>
-
-        {/* Match analytics + activity pills */}
-        <div className="flex flex-wrap gap-1.5">
-          {matchPct >= 25 && (
-            <span
-              className="tn-match-stat"
-              style={{ "--c": "#a855f7" }}
-              title="Strongest cross-link with an opposite-type item"
-            >
-              <Icon.Brain />
-              Match {matchPct}%
-            </span>
-          )}
-          {imgPct != null && imgPct >= 20 && (
-            <span
-              className="tn-match-stat"
-              style={{
-                "--c":
-                  imgPct >= 70
-                    ? "#a855f7"
-                    : imgPct >= 40
-                      ? "#22d3ee"
-                      : "#94a3b8",
-              }}
-              title="Best image similarity (dHash + colour histogram)"
-            >
-              <Icon.Sparkles />
-              Img {imgPct}%
-            </span>
-          )}
-          <span
-            className="tn-match-stat"
-            style={{ "--c": trustColor }}
-            title={`TrustScore: ${trust} · ${trustLabel(trust)}`}
-          >
-            <Icon.Shield />
-            Trust {trust}
-          </span>
-          {nearbyCount > 0 && (
-            <span
-              className="tn-match-stat"
-              style={{ "--c": "#22d3ee" }}
-              title="Opposite-type items within 1 km"
-            >
-              <Icon.Pin />
-              {nearbyCount} nearby
-            </span>
-          )}
-          {fraud && (
-            <span
-              className="tn-match-stat"
-              style={{ "--c": fraudColor }}
-              title={fraud.reasons.join(" · ") || "No anomalies detected"}
-            >
-              <Icon.Alert />
-              {fraud.level === "low"
-                ? "Low risk"
-                : fraud.level === "medium"
-                  ? "Med risk"
-                  : "High risk"}
-            </span>
-          )}
-        </div>
-
-        {/* Claim activity */}
-        {totalClaims > 0 && (
-          <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-mono">
-            <span className="text-slate-500 uppercase tracking-[0.16em] mr-0.5">
-              Activity
-            </span>
-            {pending > 0 && (
-              <span className="px-2 py-0.5 rounded-md bg-amber-400/10 text-amber-300 border border-amber-400/30">
-                {pending} pending
-              </span>
-            )}
-            {approved > 0 && (
-              <span className="px-2 py-0.5 rounded-md bg-emerald-400/10 text-emerald-300 border border-emerald-400/30 shadow-[0_0_8px_rgba(52,211,153,0.18)]">
-                {approved} approved
-              </span>
-            )}
-            {rejected > 0 && (
-              <span className="px-2 py-0.5 rounded-md bg-rose-500/10 text-rose-300 border border-rose-500/30">
-                {rejected} rejected
-              </span>
-            )}
-          </div>
-        )}
-
-        <div className="flex items-center gap-3">
-          <div className="relative w-12 h-12 shrink-0">
-            <svg className="w-12 h-12 -rotate-90" viewBox="0 0 36 36">
-              <circle
-                cx="18"
-                cy="18"
-                r="16"
-                fill="none"
-                stroke="rgba(255,255,255,0.06)"
-                strokeWidth="3"
-              />
-              <circle
-                cx="18"
-                cy="18"
-                r="16"
-                fill="none"
-                stroke={`url(#${trustGrad})`}
-                strokeWidth="3"
-                strokeDasharray={`${((trust * 100.53) / 100).toFixed(2)} 100.53`}
-                strokeLinecap="round"
-              />
-              <defs>
-                <linearGradient id={trustGrad} x1="0" y1="0" x2="1" y2="1">
-                  <stop offset="0%" stopColor="#22d3ee" />
-                  <stop offset="100%" stopColor="#a855f7" />
-                </linearGradient>
-              </defs>
-            </svg>
-            <div className="absolute inset-0 flex flex-col items-center justify-center">
-              <span className="text-[12px] font-mono font-bold tabular-nums text-slate-100 leading-none">
-                {trust}
-              </span>
-              <span className="text-[7.5px] font-mono text-cyan-300 mt-0.5 uppercase tracking-[0.12em]">
-                trust
-              </span>
-            </div>
-          </div>
-          <div className="flex-1 min-w-0">
-            <div className="text-[9.5px] uppercase tracking-[0.18em] font-mono text-slate-500 mb-1">
-              Recovery progress
-            </div>
-            {recovered ? (
-              <div className="text-[12px] text-amber-300 font-medium flex items-center gap-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse shadow-[0_0_8px_rgba(251,191,36,0.7)]" />
-                Recovered{" "}
-                <span className="text-slate-500 font-mono">
-                  {item.recoveredAt ? `· ${formatTime(item.recoveredAt)}` : ""}
-                </span>
-              </div>
-            ) : approved > 0 ? (
-              <div className="text-[12px] text-emerald-300 font-medium">
-                <span className="w-1.5 h-1.5 inline-block mr-1 rounded-full bg-emerald-400 align-middle shadow-[0_0_8px_rgba(52,211,153,0.7)]" />
-                {approved} approved · chat open
-              </div>
-            ) : pending > 0 ? (
-              <div className="text-[12px] text-amber-300 font-medium">
-                <span className="w-1.5 h-1.5 inline-block mr-1 rounded-full bg-amber-400 animate-pulse align-middle" />
-                {pending} pending claim{pending > 1 ? "s" : ""}
-              </div>
-            ) : (
-              <div className="text-[12px] text-slate-500">No claims yet</div>
-            )}
-            <div className="mt-1 h-1 rounded-full bg-white/[0.04] overflow-hidden">
-              <div
-                className="h-full rounded-full"
-                style={{
-                  width: `${recovered ? 100 : approved > 0 ? 65 : pending > 0 ? 35 : 6}%`,
-                  background: `linear-gradient(90deg, ${accent}55, ${accent})`,
-                  boxShadow: `0 0 10px ${accent}80`,
-                  transition: "width 0.6s cubic-bezier(.16,1,.3,1)",
-                }}
-              />
-            </div>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-1.5 pt-2 border-t border-white/[0.06] flex-wrap">
-          {!recovered && approved > 0 && onOpenChat && (
-            <button
-              onClick={onOpenChat}
-              className="tn-btn tn-btn-primary text-[11px] py-1.5 px-3 flex-1 min-w-[64px]"
-              title="Open the secure chat with the claimant"
-            >
-              <Icon.Mail />
-              Chat
-            </button>
-          )}
-          {onViewMatches && (
-            <button
-              onClick={onViewMatches}
-              className="tn-btn text-[11px] py-1.5 px-3 bg-purple-400/10 text-purple-200 border border-purple-400/30 hover:bg-purple-400/20 hover:border-purple-400/50 flex-1 min-w-[80px]"
-              title="See potential cross-links for this item"
-            >
-              <Icon.Brain />
-              Matches
-            </button>
-          )}
-          <button
-            onClick={onEdit}
-            className="tn-btn tn-btn-ghost text-[11px] py-1.5 px-3 flex-1 min-w-[64px]"
-            title="Edit item details"
-          >
-            ✎ Edit
-          </button>
-          <button
-            onClick={onDelete}
-            className="tn-btn text-[11px] py-1.5 px-3 bg-rose-500/10 text-rose-300 border border-rose-500/30 hover:bg-rose-500/20"
-            title="Delete permanently"
-          >
-            <Icon.Trash />
-          </button>
-        </div>
-      </div>
-    </motion.div>
-  );
-}
-
-function YourUploads({
-  items,
-  allItems,
-  claims,
-  user,
-  onEdit,
-  onDelete,
-  onShowAll,
-  onOpenChat,
-  onPostItem,
-  onViewMatches,
-}) {
-  // Image fingerprints (cached at module scope; this hook just
-  // surfaces what's been computed for the current items list).
-  const { fingerprints, computing } = useImageFingerprints(allItems);
-
-  // Index claims on the user's items so we can render counts inline.
-  const claimsByItem = useMemo(() => {
-    const m = new Map();
-    if (!user) return m;
-    for (const c of claims) {
-      if (c.ownerUid !== user.uid) continue;
-      if (!m.has(c.itemId)) m.set(c.itemId, []);
-      m.get(c.itemId).push(c);
-    }
-    return m;
-  }, [claims, user]);
-
-  // For each upload, compute the strongest opposite-type match,
-  // image similarity, count of nearby (<=1km, opposite-type) items,
-  // and fraud risk. Reuses the same helpers as the SmartMatch panel.
-  const matchInfoById = useMemo(() => {
-    const out = new Map();
-    for (const my of items) {
-      const myType = (my.type || "").toLowerCase();
-      const oppType =
-        myType === "lost" ? "found" : myType === "found" ? "lost" : null;
-      let best = { score: 0, imgSim: null, distance: null, otherId: null };
-      let nearbyCount = 0;
-      if (oppType) {
-        for (const o of allItems) {
-          if (o.id === my.id) continue;
-          if ((o.type || "").toLowerCase() !== oppType) continue;
-          const d = itemDistanceMeters(my, o);
-          const imgSim = imageSimilarity(
-            fingerprints[my.id],
-            fingerprints[o.id],
-          );
-          const lost = myType === "lost" ? my : o;
-          const found = myType === "found" ? my : o;
-          const score = advancedMatchScore({
-            lost,
-            found,
-            imgSim,
-            distance: d,
-          });
-          if (score > best.score) {
-            best = { score, imgSim, distance: d, otherId: o.id };
-          }
-          if (d != null && d <= 1000) nearbyCount++;
-        }
-      }
-      const fraud = itemFraudRisk(my, allItems, fingerprints);
-      out.set(my.id, { ...best, nearbyCount, fraud });
-    }
-    return out;
-  }, [items, allItems, fingerprints]);
-
-  const [sortBy, setSortBy] = useState("recent"); // 'recent' | 'progress' | 'trust'
-
-  const sorted = useMemo(() => {
-    const arr = [...items];
-    if (sortBy === "trust") {
-      arr.sort(
-        (a, b) =>
-          computeTrustScore(b, allItems) - computeTrustScore(a, allItems),
-      );
-    } else if (sortBy === "progress") {
-      const score = (i) => {
-        if (isRecoveredItem(i)) return 3;
-        const cs = claimsByItem.get(i.id) || [];
-        if (cs.some((c) => c.status === "approved")) return 2;
-        if (cs.some((c) => c.status === "pending")) return 1;
-        return 0;
-      };
-      arr.sort((a, b) => score(b) - score(a));
-    } else {
-      arr.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
-    }
-    return arr;
-  }, [items, sortBy, allItems, claimsByItem]);
-
-  const lostCount = items.filter(
-    (i) => (i.type || "").toLowerCase() === "lost",
-  ).length;
-  const foundCount = items.filter(
-    (i) => (i.type || "").toLowerCase() === "found",
-  ).length;
-  const recoveredCount = items.filter(isRecoveredItem).length;
-  const avgTrust = items.length
-    ? Math.round(
-        items.reduce((s, i) => s + computeTrustScore(i, allItems), 0) /
-          items.length,
-      )
-    : 0;
-
-  return (
-    <section className="px-3 sm:px-6 lg:px-10 pt-8">
-      <div className="mb-4 px-1 flex items-end justify-between flex-wrap gap-3">
-        <div>
-          <div className="text-[10px] uppercase tracking-[0.22em] text-purple-400 font-mono mb-1.5 flex items-center gap-2">
-            <span className="w-3 h-px bg-purple-400" />
-            Dashboard · Your Uploads
-          </div>
-          <h2 className="text-2xl sm:text-3xl font-semibold tracking-tight">
-            <span className="tn-gradient-text">Your</span>{" "}
-            <span className="text-slate-100">recovery footprint</span>
-          </h2>
-          <p className="text-sm text-slate-400 mt-1">
-            Manage everything you've reported on the network in one place.
-          </p>
-          {user && (
-            <div className="mt-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-cyan-400/10 border border-cyan-400/30 text-[10px] font-mono text-cyan-200">
-              <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.7)]" />
-              Filtering as{" "}
-              <span className="text-white">
-                {user.email || user.uid?.slice(0, 8)}
-              </span>{" "}
-              · {items.length} post{items.length === 1 ? "" : "s"}
-            </div>
-          )}
-        </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          <button onClick={onShowAll} className="tn-btn tn-btn-ghost">
-            ← All items
-          </button>
-          <button onClick={onPostItem} className="tn-btn tn-btn-primary">
-            <Icon.Plus />
-            New report
-          </button>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-3 mb-5">
-        <UploadStat
-          label="Total uploads"
-          value={items.length}
-          accent="#a855f7"
-        />
-        <UploadStat label="Lost" value={lostCount} accent="#fb7185" />
-        <UploadStat label="Found" value={foundCount} accent="#34d399" />
-        <UploadStat
-          label="Recovered (14d)"
-          value={recoveredCount}
-          accent="#fbbf24"
-        />
-      </div>
-
-      <div className="tn-glass rounded-xl p-2.5 mb-4 flex items-center justify-between gap-2 flex-wrap">
-        <div className="flex items-center gap-2 px-1 text-xs">
-          <span className="text-slate-400 font-mono uppercase tracking-wider text-[10px]">
-            Avg Trust
-          </span>
-          <span
-            className="font-mono text-base font-semibold tabular-nums"
-            style={{
-              color:
-                avgTrust >= 70
-                  ? "#34d399"
-                  : avgTrust >= 45
-                    ? "#fbbf24"
-                    : "#94a3b8",
-            }}
-          >
-            {avgTrust}
-          </span>
-          <span className="text-[10px] font-mono text-slate-500 uppercase tracking-[0.12em] hidden sm:inline">
-            · {trustLabel(avgTrust)}
-          </span>
-        </div>
-        <div className="flex items-center gap-1 text-[10px] font-mono">
-          <span className="text-slate-500 uppercase tracking-wider mr-1">
-            Sort
-          </span>
-          {[
-            { k: "recent", label: "Recent" },
-            { k: "progress", label: "Progress" },
-            { k: "trust", label: "Trust" },
-          ].map((o) => (
-            <button
-              key={o.k}
-              onClick={() => setSortBy(o.k)}
-              className={cn(
-                "px-2.5 py-1 rounded-md uppercase tracking-wider transition-colors",
-                sortBy === o.k
-                  ? "bg-purple-400/20 text-purple-200 border border-purple-400/40"
-                  : "text-slate-400 hover:text-slate-200 border border-transparent",
-              )}
-            >
-              {o.label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {items.length === 0 ? (
-        <div className="tn-glass rounded-2xl p-12 text-center">
-          <div className="inline-flex items-center justify-center w-14 h-14 rounded-xl bg-white/[0.03] border border-white/[0.06] mb-4 text-slate-500">
-            <Icon.Plus />
-          </div>
-          <p className="text-slate-200 text-base font-medium mb-1">
-            You haven't reported anything yet
-          </p>
-          <p className="text-slate-500 text-sm mb-4">
-            Submit a Lost or Found item to start your recovery footprint.
-          </p>
-          <button onClick={onPostItem} className="tn-btn tn-btn-primary">
-            <Icon.Plus />
-            Report your first item
-          </button>
-        </div>
-      ) : (
-        <motion.div
-          layout
-          className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 sm:gap-4"
-        >
-          <AnimatePresence mode="popLayout">
-            {sorted.map((item, idx) => {
-              const cs = claimsByItem.get(item.id) || [];
-              const pending = cs.filter((c) => c.status === "pending").length;
-              const approvedClaims = cs.filter((c) => c.status === "approved");
-              const rejected = cs.filter((c) => c.status === "rejected").length;
-              return (
-                <UploadCard
-                  key={item.id}
-                  item={item}
-                  idx={idx}
-                  trust={computeTrustScore(item, allItems)}
-                  recovered={isRecoveredItem(item)}
-                  pending={pending}
-                  approved={approvedClaims.length}
-                  rejected={rejected}
-                  totalClaims={cs.length}
-                  matchInfo={matchInfoById.get(item.id)}
-                  scanning={computing && !!item.photoData}
-                  onEdit={() => onEdit(item)}
-                  onDelete={() => onDelete(item.id)}
-                  onViewMatches={
-                    onViewMatches ? () => onViewMatches(item) : null
-                  }
-                  onOpenChat={
-                    approvedClaims.length > 0
-                      ? () => onOpenChat(approvedClaims[0])
-                      : null
-                  }
-                />
-              );
-            })}
-          </AnimatePresence>
-        </motion.div>
-      )}
-    </section>
-  );
-}
+const scrollToMap = () =>
+  document
+    .getElementById("hunt-map")
+    ?.scrollIntoView({ behavior: "smooth", block: "nearest" });
 
 function App() {
   const [user, setUser] = useState(null);
-  const [items, setItems] = useState([]);
   const [authOpen, setAuthOpen] = useState(false);
-  const [postOpen, setPostOpen] = useState(false);
-  const [contactItem, setContactItem] = useState(null);
-  const [viewingMyPosts, setViewingMyPosts] = useState(false);
-  const [editingItem, setEditingItem] = useState(null);
-  const [matchPreviewItem, setMatchPreviewItem] = useState(null);
-  // App-level fingerprint hook (the cache is module-level, so this is
-  // free if SmartMatchCards / YourUploads also called it earlier).
-  const appFingerprints = useImageFingerprints(items);
-
-  // Claims + chat
-  const claims = useClaims(user);
-  const [claimsPanelOpen, setClaimsPanelOpen] = useState(false);
-  const [chatClaim, setChatClaim] = useState(null);
-  const [claimBusy, setClaimBusy] = useState(false);
-  const [seenTick, setSeenTick] = useState(0);
-
-  const inboxUnread = useMemo(() => {
-    if (!user) return 0;
-    const seen = readSeen();
-    return claims.reduce(
-      (n, c) => n + (claimIsUnread(c, user.uid, seen) ? 1 : 0),
-      0,
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [claims, user, seenTick]);
-
-  const inboxCount = useMemo(
-    () =>
-      claims.filter(
-        (c) =>
-          (c.ownerUid === user?.uid &&
-            c.status === "pending" &&
-            c.claimantUid !== user?.uid) ||
-          c.status === "approved",
-      ).length,
-    [claims, user],
-  );
-
-  const handleCreateClaim = useCallback(
-    async (item) => {
-      if (!user) {
-        setAuthOpen(true);
-        return;
-      }
-      setClaimBusy(true);
-      try {
-        await createClaim({ item, currentUser: user });
-      } catch (e) {
-        alert(e.message || "Failed to submit claim.");
-      } finally {
-        setClaimBusy(false);
-      }
-    },
-    [user],
-  );
-
-  const handleOpenChat = useCallback((claim) => {
-    setChatClaim(claim);
-    setClaimsPanelOpen(false);
-    markSeen(claim.id);
-    setSeenTick((t) => t + 1);
-  }, []);
-
-  const handleCloseChat = useCallback(() => {
-    if (chatClaim) markSeen(chatClaim.id);
-    setSeenTick((t) => t + 1);
-    setChatClaim(null);
-  }, [chatClaim]);
-
-  // Keep chatClaim in sync with the latest snapshot (so unread/last-message
-  // values refresh while the chat is open).
-  useEffect(() => {
-    if (!chatClaim) return;
-    const fresh = claims.find((c) => c.id === chatClaim.id);
-    if (fresh && fresh !== chatClaim) setChatClaim(fresh);
-  }, [claims, chatClaim]);
+  const [mapFocus, setMapFocus] = useState(null); // { id, n } — n forces re-focus
+  const [draftPin, setDraftPin] = useState(null); // [lat, lng] for the Wire composer
+  const [picking, setPicking] = useState(false);
+  const clues = useClues();
+  const [teams, teamsLoaded] = useTeams();
+  const intel = useIntel();
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => setUser(u || null));
     return () => unsub();
   }, []);
 
+  // The signed-in account's team comes straight off the leaderboard
+  // subscription (doc id = uid), so no second listener is needed.
+  const team = useMemo(
+    () => (user ? teams.find((t) => t.id === user.uid) || null : null),
+    [teams, user],
+  );
+  const solvedCount = team
+    ? Math.min(team.cluesSolved || 0, clues.length)
+    : 0;
+
+  const cluePins = useMemo(() => {
+    if (!team) return [];
+    return clues
+      .slice(0, solvedCount + 1)
+      .map((c, i) => ({
+        ...c,
+        status: i < solvedCount ? "solved" : "open",
+        coords: clueCoords(c),
+      }))
+      .filter((c) => c.coords);
+  }, [clues, team, solvedCount]);
+
+  const intelPins = useMemo(() => intel.filter((p) => p.coords), [intel]);
+
+  // Losing the team (sign-out) abandons any half-composed pin
   useEffect(() => {
-    const unsub = onSnapshot(
-      collection(db, "items"),
-      (snap) => {
-        const list = [];
-        snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
-        list.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
-        setItems(list);
-      },
-      (err) => console.error("snapshot error:", err),
-    );
-    return () => unsub();
+    if (!team) {
+      setPicking(false);
+      setDraftPin(null);
+    }
+  }, [team]);
+
+  useEffect(() => {
+    if (!picking) return;
+    const onKey = (e) => e.key === "Escape" && setPicking(false);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [picking]);
+
+  const handleTogglePick = () => {
+    if (!picking) scrollToMap();
+    setPicking(!picking);
+  };
+
+  const handlePick = useCallback((coords) => {
+    setDraftPin(coords);
+    setPicking(false);
   }, []);
 
-  // Items belonging to the currently signed-in user.
-  // Matches by UID first (the canonical, stable identity), then by
-  // email for anonymous-posted items (so legacy posts created before
-  // sign-in can still surface in "My Posts").
-  const myItems = useMemo(() => {
-    if (!user) return [];
-    const uid = user.uid;
-    const email = (user.email || "").toLowerCase();
-    return items.filter((i) => {
-      if (i.userId && i.userId === uid) return true;
-      if (
-        i.userId === "anonymous" &&
-        email &&
-        (i.email || "").toLowerCase() === email
-      )
-        return true;
-      return false;
-    });
-  }, [items, user]);
-
-  const visibleItems = useMemo(() => {
-    if (viewingMyPosts && user) return myItems;
-    return items;
-  }, [items, myItems, user, viewingMyPosts]);
-
-  // One-line diagnostic so the filter is debuggable from DevTools.
-  useEffect(() => {
-    if (!viewingMyPosts || !user) return;
-    console.info(
-      `[TraceNet] My Posts filter — uid=${user.uid?.slice(0, 8) || "?"}… email=${user.email || "(none)"} → ${myItems.length}/${items.length} items`,
-    );
-  }, [viewingMyPosts, user, myItems.length, items.length]);
+  const handleClearPin = useCallback(() => {
+    setDraftPin(null);
+    setPicking(false);
+  }, []);
 
   const handleSignOut = useCallback(async () => {
     try {
       await signOut(auth);
-      setViewingMyPosts(false);
     } catch (e) {
       console.error(e);
     }
   }, []);
 
-  const handleDelete = useCallback(async (id) => {
-    if (!window.confirm("Delete this item permanently?")) return;
-    try {
-      await deleteDoc(doc(db, "items", id));
-    } catch (e) {
-      alert("Error: " + e.message);
-    }
+  const handleViewOnMap = useCallback((id) => {
+    setMapFocus((f) => ({ id, n: (f?.n || 0) + 1 }));
+    scrollToMap();
   }, []);
+
+  const mapEmptyHint = !user
+    ? "sign in to reveal your first target"
+    : !team
+      ? "enrol your agency to reveal your first target"
+      : "no clue locations filed yet";
 
   return (
     <>
+      <CyberBackground />
+
       <TopNavbar
         user={user}
-        viewingMyPosts={viewingMyPosts}
+        team={team}
         onSignIn={() => setAuthOpen(true)}
         onSignOut={handleSignOut}
-        onShowMyPosts={() =>
-          user ? setViewingMyPosts(true) : setAuthOpen(true)
-        }
-        onShowAll={() => setViewingMyPosts(false)}
-        onPostItem={() => setPostOpen(true)}
-        onOpenInbox={() => setClaimsPanelOpen(true)}
-        inboxCount={inboxCount}
-        inboxUnread={inboxUnread}
       />
 
-      <Hero items={items} onPostItem={() => setPostOpen(true)} />
-      <InteractiveMap
-        items={items}
-        currentUser={user}
-        claims={claims}
-        claimBusy={claimBusy}
-        onClaim={handleCreateClaim}
-        onOpenChat={handleOpenChat}
-        onRequireSignIn={() => setAuthOpen(true)}
+      <Hero
+        clueCount={clues.length}
+        solvedCount={solvedCount}
+        team={team}
+        teamCount={teams.length}
+        intelCount={intel.length}
       />
-      <LiveStats items={items} />
+      <LiveStats
+        clueCount={clues.length}
+        solvedCount={solvedCount}
+        team={team}
+        teamCount={teams.length}
+      />
 
-      <section className="px-3 sm:px-6 lg:px-10 pt-8">
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <SmartMatchCards items={items} />
-          <FraudAlertsPanel items={items} />
+      <section id="ops" className="px-3 sm:px-6 lg:px-10 pt-12 scroll-mt-24">
+        <SectionHeading
+          label="field operations"
+          lead="Map &"
+          accent="The Wire"
+          blurb="Green is your open target, blue is a file you've breached. Amber diamonds are intel from the wire — some of it is true."
+        />
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <InteractiveMap
+            cluePins={cluePins}
+            intelPins={intelPins}
+            draftPin={draftPin}
+            picking={picking}
+            onPick={handlePick}
+            emptyHint={mapEmptyHint}
+            focus={mapFocus}
+          />
+          <TheWire
+            intel={intel}
+            user={user}
+            team={team}
+            draftPin={draftPin}
+            picking={picking}
+            onTogglePick={handleTogglePick}
+            onClearPin={handleClearPin}
+            onSignIn={() => setAuthOpen(true)}
+            onFocusPin={handleViewOnMap}
+          />
         </div>
       </section>
 
-      <AnalyticsDashboard items={items} />
+      <VaultSection
+        clues={clues}
+        user={user}
+        team={team}
+        teamLoading={!teamsLoaded}
+        solvedCount={solvedCount}
+        onSignIn={() => setAuthOpen(true)}
+        onViewOnMap={handleViewOnMap}
+      />
 
-      {viewingMyPosts && user ? (
-        <YourUploads
-          items={myItems}
-          allItems={items}
-          claims={claims}
-          user={user}
-          onEdit={(item) => setEditingItem(item)}
-          onDelete={handleDelete}
-          onShowAll={() => setViewingMyPosts(false)}
-          onOpenChat={handleOpenChat}
-          onPostItem={() => setPostOpen(true)}
-          onViewMatches={(item) => setMatchPreviewItem(item)}
-        />
-      ) : (
-        <ItemGrid
-          items={visibleItems}
-          currentUser={user}
-          onContact={setContactItem}
-          onDelete={handleDelete}
-          viewingMyPosts={viewingMyPosts}
-          onShowAll={() => setViewingMyPosts(false)}
-        />
-      )}
+      <LeaderboardSection
+        teams={teams}
+        clueCount={clues.length}
+        currentUid={user?.uid}
+      />
 
       <Footer />
 
-      <PostItemSheet
-        open={postOpen}
-        onClose={() => setPostOpen(false)}
-        currentUser={user}
-      />
       <AuthModal open={authOpen} onClose={() => setAuthOpen(false)} />
-      <ContactModal item={contactItem} onClose={() => setContactItem(null)} />
-      <ClaimsPanel
-        open={claimsPanelOpen}
-        onClose={() => setClaimsPanelOpen(false)}
-        claims={claims}
-        currentUser={user}
-        onOpenChat={handleOpenChat}
-      />
-      <ChatModal
-        claim={chatClaim}
-        currentUser={user}
-        onClose={handleCloseChat}
-      />
-      <EditItemSheet item={editingItem} onClose={() => setEditingItem(null)} />
-      <MatchPreviewModal
-        item={matchPreviewItem}
-        allItems={items}
-        fingerprints={appFingerprints.fingerprints}
-        onClose={() => setMatchPreviewItem(null)}
-      />
     </>
   );
 }
