@@ -1,4 +1,4 @@
-# The Baker Street Hunt
+# Odyssey
 
 A Sherlock Holmes-flavoured campus codehunt. Detective agencies (teams) sign in, read a riddle, find the location on campus, and enter the passcode they discover there to decrypt the next case file. A live leaderboard ranks every agency, and a public intel feed — The Wire — lets them help or mislead each other.
 

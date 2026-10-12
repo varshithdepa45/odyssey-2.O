@@ -1,5 +1,5 @@
 /* ================================================================
-   The Baker Street Hunt — Campus Treasure Hunt
+   Odyssey — Campus Treasure Hunt
    ----------------------------------------------------------------
    Single-file React app loaded as an ES module via Babel-standalone.
    ================================================================ */
@@ -1021,7 +1021,7 @@ function Hero({ clueCount, solvedCount, team, teamCount, intelCount }) {
             </div>
 
             <h1 className="tn-z3 tn-heading tn-hero-title mb-5">
-              Baker Street
+              Odyssey
               <br />
               <em>Codehunt</em>
             </h1>
@@ -1922,7 +1922,7 @@ function RegisterTeamCard({ user }) {
           value={name}
           maxLength={40}
           onChange={(e) => setName(e.target.value)}
-          placeholder="e.g. baker street irregulars"
+          placeholder="e.g. Odyssey explorers"
           aria-label="Agency name"
           className="tn-input flex-1"
         />

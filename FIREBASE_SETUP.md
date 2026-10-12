@@ -1,4 +1,4 @@
-# Firebase Setup — The Baker Street Hunt
+# Firebase Setup — Odyssey
 
 The Firebase config lives at the top of `src/app.jsx` (`firebaseConfig`). Enable **Authentication → Email/Password** and **Firestore** in the Firebase Console.
 
