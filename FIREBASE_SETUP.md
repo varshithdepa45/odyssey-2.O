@@ -3,9 +3,11 @@
 The Firebase config lives at the top of `src/app.jsx` (`firebaseConfig`). Enable **Firestore** in the Firebase Console, then under **Authentication → Sign-in method** enable:
 
 - **Google** — the primary sign-in (popup). Set a project support email when prompted.
-- **Email/Password** — the fallback option in the sign-in modal.
+- **Email link (passwordless)** — the fallback option in the sign-in modal. This sends a sign-in link to the user's Gmail or other email inbox.
 
 Under **Authentication → Settings → Authorized domains**, add every domain the site is served from (for example `yourname.github.io`). `localhost` is authorized by default; a domain missing from this list fails with "ACCESS DENIED - DOMAIN NOT AUTHORIZED".
+
+The email-link flow must be enabled under **Authentication → Sign-in method → Email/Password → Email link (passwordless sign-in)**. Users enter their email address, receive a link, and return to the same site to complete sign-in.
 
 ## Collections
 

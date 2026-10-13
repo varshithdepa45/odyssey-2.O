@@ -35,12 +35,13 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 import {
   getAuth,
-  createUserWithEmailAndPassword,
-  signInWithEmailAndPassword,
   signOut,
   onAuthStateChanged,
   GoogleAuthProvider,
   signInWithPopup,
+  sendSignInLinkToEmail,
+  isSignInWithEmailLink,
+  signInWithEmailLink,
 } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
 
 /* ================== FIREBASE INIT ================== */
@@ -2361,6 +2362,9 @@ const AUTH_ERRORS = {
   "auth/account-exists-with-different-credential":
     "ACCESS DENIED - EMAIL LINKED TO ANOTHER SIGN-IN METHOD",
   "auth/invalid-credential": "ACCESS DENIED - INVALID CREDENTIALS",
+  "auth/invalid-action-code": "ACCESS DENIED - SIGN-IN LINK EXPIRED",
+  "auth/expired-action-code": "ACCESS DENIED - SIGN-IN LINK EXPIRED",
+  "auth/missing-email": "ACCESS DENIED - EMAIL ADDRESS REQUIRED",
   "auth/wrong-password": "ACCESS DENIED - INVALID CREDENTIALS",
   "auth/user-not-found": "ACCESS DENIED - INVALID CREDENTIALS",
   "auth/invalid-email": "ACCESS DENIED - MALFORMED EMAIL",
@@ -2384,18 +2388,17 @@ function scrollToVault() {
 }
 
 // Two steps:
-//   "credentials" — Google popup (primary) or email/password (fallback)
+//   "credentials" — Google popup (primary) or passwordless email link
 //   "agency"      — first sign-in only: name the team before entering
 // Returning users (a teams/{uid} doc exists) skip straight to the vault.
 function AuthModal({ open, onClose }) {
   const [step, setStep] = useState("credentials");
   const [authedUser, setAuthedUser] = useState(null);
   const [showEmail, setShowEmail] = useState(false);
-  const [tab, setTab] = useState("signin");
   const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
   const [agency, setAgency] = useState("");
   const [busy, setBusy] = useState(""); // "" | "google" | "email" | "agency"
+  const [emailSent, setEmailSent] = useState(false);
   const [err, setErr] = useState("");
 
   useEffect(() => {
@@ -2404,9 +2407,9 @@ function AuthModal({ open, onClose }) {
       setAuthedUser(null);
       setShowEmail(false);
       setEmail("");
-      setPassword("");
       setAgency("");
       setBusy("");
+      setEmailSent(false);
       setErr("");
     }
   }, [open]);
@@ -2424,6 +2427,35 @@ function AuthModal({ open, onClose }) {
       setStep("agency");
     }
   };
+
+  useEffect(() => {
+    if (!open || !isSignInWithEmailLink(auth, window.location.href)) return;
+    const savedEmail = window.localStorage.getItem("odyssey-email-link");
+    if (!savedEmail) {
+      setShowEmail(true);
+      setErr("ENTER THE SAME EMAIL ADDRESS TO COMPLETE SIGN-IN");
+      return;
+    }
+
+    let cancelled = false;
+    setBusy("email");
+    signInWithEmailLink(auth, savedEmail, window.location.href)
+      .then(async (result) => {
+        window.localStorage.removeItem("odyssey-email-link");
+        window.history.replaceState({}, document.title, window.location.pathname);
+        if (!cancelled) await routeSignedIn(result.user);
+      })
+      .catch((e) => {
+        console.error("email link sign-in:", e);
+        if (!cancelled) setErr(authErrorLine(e));
+      })
+      .finally(() => {
+        if (!cancelled) setBusy("");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
 
   const handleGoogleLogin = async () => {
     if (busy) return;
@@ -2444,19 +2476,20 @@ function AuthModal({ open, onClose }) {
     e.preventDefault();
     if (busy) return;
     setErr("");
-    if (!email || !password) {
-      setErr("ACCESS DENIED - EMAIL AND PASSWORD REQUIRED");
+    if (!email.trim()) {
+      setErr("ACCESS DENIED - EMAIL ADDRESS REQUIRED");
       return;
     }
     setBusy("email");
     try {
-      const result =
-        tab === "signup"
-          ? await createUserWithEmailAndPassword(auth, email, password)
-          : await signInWithEmailAndPassword(auth, email, password);
-      await routeSignedIn(result.user);
+      await sendSignInLinkToEmail(auth, email.trim(), {
+        url: `${window.location.origin}${window.location.pathname}`,
+        handleCodeInApp: true,
+      });
+      window.localStorage.setItem("odyssey-email-link", email.trim());
+      setEmailSent(true);
     } catch (e2) {
-      console.error("email sign-in:", e2);
+      console.error("email link request:", e2);
       setErr(authErrorLine(e2));
     } finally {
       setBusy("");
@@ -2597,7 +2630,7 @@ function AuthModal({ open, onClose }) {
                     className="tn-z1 tn-label mt-6 flex items-center gap-2 w-full hover:text-white"
                   >
                     <span className="flex-1 h-px bg-ch-acc/15" />
-                    {showEmail ? "hide" : "or use"} email + password
+                    {showEmail ? "hide" : "or use"} email link
                     <span className="flex-1 h-px bg-ch-acc/15" />
                   </button>
 
@@ -2606,21 +2639,6 @@ function AuthModal({ open, onClose }) {
                       onSubmit={handleEmailSubmit}
                       className="tn-z1 tn-3d space-y-3 mt-4"
                     >
-                      <div className="flex gap-1">
-                        {["signup", "signin"].map((t) => (
-                          <button
-                            key={t}
-                            type="button"
-                            onClick={() => setTab(t)}
-                            className={cn(
-                              "tn-hud flex-1 !py-2.5",
-                              tab === t && "tn-hud-on",
-                            )}
-                          >
-                            {t === "signup" ? "Sign up" : "Sign in"}
-                          </button>
-                        ))}
-                      </div>
                       <input
                         type="email"
                         value={email}
@@ -2630,17 +2648,11 @@ function AuthModal({ open, onClose }) {
                         autoComplete="email"
                         className="tn-input"
                       />
-                      <input
-                        type="password"
-                        value={password}
-                        onChange={(e) => setPassword(e.target.value)}
-                        placeholder="password"
-                        aria-label="Password"
-                        autoComplete={
-                          tab === "signup" ? "new-password" : "current-password"
-                        }
-                        className="tn-input"
-                      />
+                      {emailSent && (
+                        <div className="font-mono text-xs text-ch-acc">
+                          &gt; LINK TRANSMITTED - CHECK YOUR GMAIL INBOX
+                        </div>
+                      )}
                       <Tilt
                         as="button"
                         max={10}
@@ -2648,11 +2660,7 @@ function AuthModal({ open, onClose }) {
                         disabled={!!busy}
                         className="tn-btn tn-btn-ghost w-full py-3.5"
                       >
-                        {busy === "email"
-                          ? "Authenticating…"
-                          : tab === "signup"
-                            ? "Create account"
-                            : "Sign in"}
+                        {busy === "email" ? "Transmitting…" : "Send sign-in link"}
                       </Tilt>
                     </form>
                   )}
@@ -2693,7 +2701,9 @@ const scrollToMap = () =>
 
 function App() {
   const [user, setUser] = useState(null);
-  const [authOpen, setAuthOpen] = useState(false);
+  const [authOpen, setAuthOpen] = useState(() =>
+    isSignInWithEmailLink(auth, window.location.href),
+  );
   const [mapFocus, setMapFocus] = useState(null); // { id, n } — n forces re-focus
   const [draftPin, setDraftPin] = useState(null); // [lat, lng] for the Wire composer
   const [picking, setPicking] = useState(false);
