@@ -80,6 +80,19 @@ const POINTS_PER_CLUE = 100;
 // Point this at your campus.
 const MAP_CENTER = [40.7589, -73.9851];
 
+const DEMO_CASES = [
+  ["01", "The Vanishing Compass", "odyssey-01"],
+  ["02", "The Midnight Signal", "odyssey-02"],
+  ["03", "The Glass Key", "odyssey-03"],
+  ["04", "The Silent Archive", "odyssey-04"],
+  ["05", "The Ciphered Map", "odyssey-05"],
+  ["06", "The Clockwork Clue", "odyssey-06"],
+  ["07", "The Blue Lantern", "odyssey-07"],
+  ["08", "The Hidden Passage", "odyssey-08"],
+  ["09", "The Final Witness", "odyssey-09"],
+  ["10", "The Odyssey Protocol", "odyssey-10"],
+].map(([number, title, code]) => ({ number, title, code }));
+
 function normalizePasscode(s) {
   return String(s ?? "")
     .trim()
@@ -918,6 +931,7 @@ const NAV_LINKS = [
   { href: "#ops", label: "Map" },
   { href: "#ops", label: "Wire" },
   { href: "#vault", label: "Vault" },
+  { href: "#case-downloads", label: "Downloads" },
   { href: "#leaderboard", label: "Ranks" },
 ];
 
@@ -931,7 +945,7 @@ function TopNavbar({ user, team, onSignIn, onSignOut }) {
           </span>
           <span className="leading-tight min-w-0">
             <span className="block font-mono font-semibold text-sm tracking-[0.14em] uppercase truncate text-white">
-              Baker_Street<span className="text-ch-acc">//</span>Hunt
+              Odyssey<span className="text-ch-acc">//</span>Hunt
             </span>
             <span className="tn-label hidden sm:block">
               campus codehunt · detective agency
@@ -2165,6 +2179,154 @@ function ArchiveCard({ clue, index, solved, onViewOnMap }) {
   );
 }
 
+function createDemoCasePdf(caseFile) {
+  const text = [
+    "ODYSSEY // DEMO CASE FILE",
+    `CASE ${caseFile.number}: ${caseFile.title}`,
+    "",
+    "This is a placeholder PDF for the Odyssey case-download demo.",
+    "Replace this file with the real case PDF before launch.",
+  ];
+  const lines = text
+    .map(
+      (line, index) =>
+        `BT /F1 16 Tf 72 ${730 - index * 28} Td (${line.replace(/[()\\]/g, "\\$&")}) Tj ET`,
+    )
+    .join("\n");
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+    `<< /Length ${lines.length} >>\nstream\n${lines}\nendstream`,
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+  ];
+  let pdf = "%PDF-1.4\n";
+  const offsets = [0];
+  objects.forEach((object, index) => {
+    offsets.push(pdf.length);
+    pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  });
+  const xref = pdf.length;
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  offsets.slice(1).forEach((offset) => {
+    pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
+  });
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
+  return new Blob([pdf], { type: "application/pdf" });
+}
+
+function DemoCaseVault({ user, onSignIn }) {
+  const [unlocked, setUnlocked] = useState([]);
+  const [code, setCode] = useState("");
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    if (!user) {
+      setUnlocked([]);
+      return;
+    }
+    try {
+      setUnlocked(
+        JSON.parse(
+          window.localStorage.getItem(`odyssey-demo-cases:${user.uid}`) || "[]",
+        ),
+      );
+    } catch {
+      setUnlocked([]);
+    }
+  }, [user]);
+
+  const unlockCase = (event) => {
+    event.preventDefault();
+    if (!user) return;
+    const match = DEMO_CASES.find(
+      (caseFile) => normalizePasscode(caseFile.code) === normalizePasscode(code),
+    );
+    if (!match) {
+      setMessage("ACCESS DENIED - CODE NOT RECOGNIZED");
+      return;
+    }
+    const next = [...new Set([...unlocked, match.number])];
+    setUnlocked(next);
+    window.localStorage.setItem(
+      `odyssey-demo-cases:${user.uid}`,
+      JSON.stringify(next),
+    );
+    setCode("");
+    setMessage(`CASE ${match.number} UNLOCKED - DOWNLOAD READY`);
+  };
+
+  const downloadCase = (caseFile) => {
+    const url = URL.createObjectURL(createDemoCasePdf(caseFile));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `odyssey-case-${caseFile.number}.pdf`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <section id="case-downloads" className="px-3 sm:px-6 lg:px-10 pt-12 scroll-mt-24">
+      <SectionHeading
+        label="demo document vault"
+        lead="Case"
+        accent="Downloads"
+        blurb="Enter any demo code to unlock its matching case PDF. These local placeholders will be replaced by Firebase Storage files."
+      />
+      {!user ? (
+        <Tilt max={4} className="tn-panel p-6 sm:p-8 max-w-xl">
+          <div className="tn-z1 tn-label tn-label-acc mb-2">// authentication required</div>
+          <p className="tn-z1 text-sm text-ch-mute mb-5">
+            Sign in before unlocking and downloading case documents.
+          </p>
+          <button type="button" onClick={onSignIn} className="tn-btn tn-btn-primary px-5 py-3.5">
+            Sign in to open the vault
+          </button>
+        </Tilt>
+      ) : (
+        <>
+          <form onSubmit={unlockCase} className="tn-panel p-5 sm:p-6 max-w-2xl flex flex-col sm:flex-row gap-3">
+            <input
+              value={code}
+              onChange={(event) => setCode(event.target.value)}
+              className="tn-input flex-1"
+              placeholder="demo code, e.g. odyssey-01"
+              aria-label="Demo case code"
+            />
+            <button type="submit" className="tn-btn tn-btn-primary px-5">
+              Unlock case
+            </button>
+          </form>
+          {message && <div role="status" className="font-mono text-xs text-ch-acc mt-3">&gt; {message}</div>}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 mt-4">
+            {DEMO_CASES.map((caseFile) => {
+              const isUnlocked = unlocked.includes(caseFile.number);
+              return (
+                <Tilt key={caseFile.number} max={6} className={cn("tn-panel p-4", !isUnlocked && "opacity-60")}>
+                  <div className="tn-label mb-2">case {caseFile.number}</div>
+                  <h3 className="font-semibold text-white min-h-12">{caseFile.title}</h3>
+                  <div className="tn-label mt-3 mb-3">{isUnlocked ? "unlocked" : "sealed"}</div>
+                  <button
+                    type="button"
+                    disabled={!isUnlocked}
+                    onClick={() => downloadCase(caseFile)}
+                    className="tn-btn tn-btn-ghost w-full py-2.5 disabled:cursor-not-allowed"
+                  >
+                    Download PDF
+                  </button>
+                </Tilt>
+              );
+            })}
+          </div>
+          <p className="tn-label mt-4">
+            demo codes: odyssey-01 through odyssey-10
+          </p>
+        </>
+      )}
+    </section>
+  );
+}
+
 function VaultSection({
   clues,
   user,
@@ -2681,7 +2843,7 @@ function Footer() {
     <footer className="px-3 sm:px-6 lg:px-10 py-10">
       <div className="flex flex-col sm:flex-row items-center justify-between gap-3 border-t border-ch-acc/15 pt-5 tn-label">
         <span>
-          Baker_Street<span className="text-ch-acc">//</span>Hunt
+          Odyssey<span className="text-ch-acc">//</span>Hunt
         </span>
         <span className="flex items-center gap-2">
           <span className="tn-dot" />
@@ -2813,6 +2975,8 @@ function App() {
         team={team}
         teamCount={teams.length}
       />
+
+      <DemoCaseVault user={user} onSignIn={() => setAuthOpen(true)} />
 
       <section id="ops" className="px-3 sm:px-6 lg:px-10 pt-12 scroll-mt-24">
         <SectionHeading

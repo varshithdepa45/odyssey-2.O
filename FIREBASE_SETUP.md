@@ -9,6 +9,25 @@ Under **Authentication → Settings → Authorized domains**, add every domain t
 
 The email-link flow must be enabled under **Authentication → Sign-in method → Email/Password → Email link (passwordless sign-in)**. Users enter their email address, receive a link, and return to the same site to complete sign-in.
 
+## Case PDF demo
+
+The Odyssey page includes a client-only demo vault with ten independent case files.
+Use `odyssey-01` through `odyssey-10` after signing in. Each code unlocks a
+placeholder PDF generated in the browser and available through the **Download
+PDF** button. Demo unlocks are stored in the signed-in browser's local storage.
+
+For production case files, add a `cases/{caseId}` document for each case:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `title` | string | Case title shown in the vault |
+| `codeHash` | string | SHA-256 hash of the normalized unlock code |
+| `storagePath` | string | Firebase Storage path, for example `cases/case-01.pdf` |
+
+Upload the PDFs to Firebase Storage under the matching `storagePath`, then
+replace the demo vault with Firebase Storage download URLs. Do not store
+real unlock codes in client-side source code.
+
 ## Collections
 
 ### `teams/{uid}`
