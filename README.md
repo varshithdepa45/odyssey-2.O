@@ -4,7 +4,7 @@ A Sherlock Holmes-flavoured campus codehunt. Detective agencies (teams) sign in,
 
 ## How it plays
 
-1. **Sign in** (Firebase email/password) and **name your agency**. One agency per account.
+1. **Sign in** with Google (or email/password) and **name your agency**. One agency per account.
 2. **Vault** — the open clue sits in the decryption vault; the rest are sealed. Enter the passcode found at the scene to breach it (+100 pts) and decrypt the next one.
 3. **The Wire** — a live terminal feed. Any enrolled agency can post intel and optionally attach a map pin. Nothing marks a post as true, so pins can be bluffs.
 4. **Map** — your unlocked clues (green = open target, blue = breached) plus every pinned Wire post (amber diamonds). Sealed clues never appear.

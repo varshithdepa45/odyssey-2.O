@@ -23,6 +23,7 @@ import {
   getFirestore,
   collection,
   doc,
+  getDoc,
   setDoc,
   addDoc,
   serverTimestamp,
@@ -38,6 +39,8 @@ import {
   signInWithEmailAndPassword,
   signOut,
   onAuthStateChanged,
+  GoogleAuthProvider,
+  signInWithPopup,
 } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
 
 /* ================== FIREBASE INIT ================== */
@@ -55,6 +58,10 @@ const firebaseConfig = {
 const fbApp = initializeApp(firebaseConfig);
 const db = getFirestore(fbApp);
 const auth = getAuth(fbApp);
+const googleProvider = new GoogleAuthProvider();
+// Always show the account chooser, so a shared laptop doesn't silently
+// reuse whichever Google account signed in last.
+googleProvider.setCustomParameters({ prompt: "select_account" });
 
 /* ================== HUNT DATA (Firestore) ================== */
 
@@ -2342,42 +2349,149 @@ function LeaderboardSection({ teams, clueCount, currentUid }) {
 
 /* ================== AUTH MODAL ================== */
 
+// Firebase auth error code → terminal-style line for the modal.
+const AUTH_ERRORS = {
+  "auth/popup-closed-by-user": "ACCESS ABORTED - G-LINK WINDOW CLOSED",
+  "auth/cancelled-popup-request": "ACCESS ABORTED - G-LINK WINDOW CLOSED",
+  "auth/popup-blocked": "ACCESS DENIED - POPUP BLOCKED BY BROWSER",
+  "auth/network-request-failed": "ACCESS DENIED - CONNECTION FAILED",
+  "auth/unauthorized-domain": "ACCESS DENIED - DOMAIN NOT AUTHORIZED",
+  "auth/operation-not-allowed": "ACCESS DENIED - SIGN-IN METHOD DISABLED",
+  "auth/user-disabled": "ACCESS DENIED - ACCOUNT DISABLED",
+  "auth/account-exists-with-different-credential":
+    "ACCESS DENIED - EMAIL LINKED TO ANOTHER SIGN-IN METHOD",
+  "auth/invalid-credential": "ACCESS DENIED - INVALID CREDENTIALS",
+  "auth/wrong-password": "ACCESS DENIED - INVALID CREDENTIALS",
+  "auth/user-not-found": "ACCESS DENIED - INVALID CREDENTIALS",
+  "auth/invalid-email": "ACCESS DENIED - MALFORMED EMAIL",
+  "auth/email-already-in-use": "ACCESS DENIED - EMAIL ALREADY ENROLLED",
+  "auth/weak-password": "ACCESS DENIED - PASSWORD TOO WEAK (6+ CHARS)",
+  "auth/too-many-requests": "ACCESS DENIED - TOO MANY ATTEMPTS, STAND BY",
+};
+const authErrorLine = (e) =>
+  AUTH_ERRORS[e?.code] || "ACCESS DENIED - CONNECTION FAILED";
+
+const GoogleGlyph = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+    <path d="M12.48 10.92v3.28h7.84c-.24 1.84-.85 3.18-1.73 4.1-1.02 1.02-2.62 2.14-5.63 2.14-4.83 0-8.6-3.89-8.6-8.72s3.77-8.72 8.6-8.72c2.6 0 4.5 1.03 5.9 2.35l2.3-2.3C19.2 1.19 16.62 0 12.48 0 5.87 0 .31 5.39.31 12s5.56 12 12.17 12c3.57 0 6.27-1.17 8.37-3.36 2.16-2.16 2.84-5.21 2.84-7.67 0-.76-.05-1.47-.17-2.05H12.48Z" />
+  </svg>
+);
+
+function scrollToVault() {
+  document
+    .getElementById("vault")
+    ?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+// Two steps:
+//   "credentials" — Google popup (primary) or email/password (fallback)
+//   "agency"      — first sign-in only: name the team before entering
+// Returning users (a teams/{uid} doc exists) skip straight to the vault.
 function AuthModal({ open, onClose }) {
-  const [tab, setTab] = useState("signin"); // Default to Sign in tab
+  const [step, setStep] = useState("credentials");
+  const [authedUser, setAuthedUser] = useState(null);
+  const [showEmail, setShowEmail] = useState(false);
+  const [tab, setTab] = useState("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [agency, setAgency] = useState("");
+  const [busy, setBusy] = useState(""); // "" | "google" | "email" | "agency"
   const [err, setErr] = useState("");
 
   useEffect(() => {
     if (!open) {
+      setStep("credentials");
+      setAuthedUser(null);
+      setShowEmail(false);
       setEmail("");
       setPassword("");
+      setAgency("");
+      setBusy("");
       setErr("");
     }
   }, [open]);
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setErr("");
-    if (!email || !password) {
-      setErr("Email and password are required.");
-      return;
-    }
-    setBusy(true);
-    try {
-      if (tab === "signup") {
-        await createUserWithEmailAndPassword(auth, email, password);
-      } else {
-        await signInWithEmailAndPassword(auth, email, password);
-      }
+  // Shared tail of every sign-in path: returning agencies go to the
+  // vault, new accounts are asked for an agency name first.
+  const routeSignedIn = async (user) => {
+    const snap = await getDoc(doc(db, "teams", user.uid));
+    if (snap.exists()) {
       onClose();
-    } catch (e2) {
-      setErr(e2.message || "Authentication failed. Please try again.");
-    } finally {
-      setBusy(false);
+      scrollToVault();
+    } else {
+      setAuthedUser(user);
+      setAgency("");
+      setStep("agency");
     }
   };
+
+  const handleGoogleLogin = async () => {
+    if (busy) return;
+    setErr("");
+    setBusy("google");
+    try {
+      const result = await signInWithPopup(auth, googleProvider);
+      await routeSignedIn(result.user);
+    } catch (e) {
+      console.error("google sign-in:", e);
+      setErr(authErrorLine(e));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const handleEmailSubmit = async (e) => {
+    e.preventDefault();
+    if (busy) return;
+    setErr("");
+    if (!email || !password) {
+      setErr("ACCESS DENIED - EMAIL AND PASSWORD REQUIRED");
+      return;
+    }
+    setBusy("email");
+    try {
+      const result =
+        tab === "signup"
+          ? await createUserWithEmailAndPassword(auth, email, password)
+          : await signInWithEmailAndPassword(auth, email, password);
+      await routeSignedIn(result.user);
+    } catch (e2) {
+      console.error("email sign-in:", e2);
+      setErr(authErrorLine(e2));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const handleAgencySubmit = async (e) => {
+    e.preventDefault();
+    if (busy) return;
+    setErr("");
+    setBusy("agency");
+    try {
+      await registerTeam(authedUser, agency);
+      onClose();
+      scrollToVault();
+    } catch (e2) {
+      console.error("agency enrolment:", e2);
+      setErr(
+        e2?.code
+          ? "ENROLMENT FAILED - CONNECTION FAILED"
+          : `ENROLMENT FAILED - ${(e2.message || "unknown error").toUpperCase()}`,
+      );
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const errorLine = err && (
+    <div
+      role="alert"
+      className="font-mono text-xs text-ch-danger border border-ch-danger/40 bg-ch-danger/10 rounded-[3px] px-3 py-2"
+    >
+      &gt; {err}
+    </div>
+  );
 
   return (
     <AnimatePresence>
@@ -2406,79 +2520,144 @@ function AuthModal({ open, onClose }) {
                 <Icon.X />
               </button>
 
-              <div className="tn-z1 tn-label tn-label-acc mb-2">
-                // agency credentials
-              </div>
-              <h2 className="tn-z2 tn-heading text-2xl mb-5">
-                {tab === "signup" ? "Enrol" : "Authenticate"}
-              </h2>
-
-              <div className="tn-z1 flex gap-1 mb-5">
-                {["signup", "signin"].map((t) => (
-                  <button
-                    key={t}
-                    type="button"
-                    onClick={() => setTab(t)}
-                    className={cn(
-                      "tn-hud flex-1 !py-2.5",
-                      tab === t && "tn-hud-on",
-                    )}
+              {step === "agency" ? (
+                <>
+                  <div className="tn-z1 tn-label tn-label-acc mb-2">
+                    // g-link established · new operative
+                  </div>
+                  <h2 className="tn-z2 tn-heading text-2xl mb-2">
+                    Agency name
+                  </h2>
+                  <p className="tn-z1 text-sm text-ch-mute mb-5 break-words">
+                    Signed in as{" "}
+                    <span className="text-white">
+                      {authedUser?.email || authedUser?.displayName || "operative"}
+                    </span>
+                    . Pick the callsign shown on the leaderboard and the wire.
+                    It can't be changed mid-hunt.
+                  </p>
+                  <form
+                    onSubmit={handleAgencySubmit}
+                    className="tn-z2 tn-3d space-y-3"
                   >
-                    {t === "signup" ? "Sign up" : "Sign in"}
+                    <input
+                      type="text"
+                      value={agency}
+                      maxLength={40}
+                      onChange={(e) => setAgency(e.target.value)}
+                      placeholder="e.g. Odyssey explorers"
+                      aria-label="Agency name"
+                      autoFocus
+                      className="tn-input"
+                    />
+                    {errorLine}
+                    <Tilt
+                      as="button"
+                      max={10}
+                      type="submit"
+                      disabled={!!busy || agency.trim().length < 2}
+                      className="tn-btn tn-btn-primary w-full py-3.5"
+                    >
+                      {busy ? "Enrolling…" : "Enter the case vault"}
+                    </Tilt>
+                  </form>
+                </>
+              ) : (
+                <>
+                  <div className="tn-z1 tn-label tn-label-acc mb-2">
+                    // agency credentials
+                  </div>
+                  <h2 className="tn-z2 tn-heading text-2xl mb-5">
+                    Authenticate
+                  </h2>
+
+                  <Tilt
+                    as="button"
+                    max={10}
+                    type="button"
+                    onClick={handleGoogleLogin}
+                    disabled={!!busy}
+                    className="tn-z2 tn-btn tn-btn-glink w-full py-4"
+                  >
+                    <GoogleGlyph />
+                    {busy === "google"
+                      ? "Establishing G-Link…"
+                      : "Initialize secure G-Link"}
+                  </Tilt>
+                  <div className="tn-z1 tn-label mt-2 normal-case tracking-normal">
+                    sign in with your google account. opens a popup.
+                  </div>
+
+                  {errorLine && <div className="tn-z1 mt-4">{errorLine}</div>}
+
+                  <button
+                    type="button"
+                    onClick={() => setShowEmail((s) => !s)}
+                    aria-expanded={showEmail}
+                    className="tn-z1 tn-label mt-6 flex items-center gap-2 w-full hover:text-white"
+                  >
+                    <span className="flex-1 h-px bg-ch-acc/15" />
+                    {showEmail ? "hide" : "or use"} email + password
+                    <span className="flex-1 h-px bg-ch-acc/15" />
                   </button>
-                ))}
-              </div>
 
-              <form onSubmit={handleSubmit} className="tn-z2 tn-3d space-y-3">
-                <div>
-                  <label className="tn-label block mb-1.5" htmlFor="auth-email">
-                    Email
-                  </label>
-                  <input
-                    id="auth-email"
-                    type="email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="you@example.com"
-                    autoComplete="email"
-                    className="tn-input"
-                  />
-                </div>
-                <div>
-                  <label className="tn-label block mb-1.5" htmlFor="auth-password">
-                    Password
-                  </label>
-                  <input
-                    id="auth-password"
-                    type="password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder="••••••••"
-                    autoComplete={
-                      tab === "signup" ? "new-password" : "current-password"
-                    }
-                    className="tn-input"
-                  />
-                </div>
-
-                {err && (
-                  <div className="font-mono text-xs text-ch-danger">{err}</div>
-                )}
-
-                <Tilt
-                  as="button"
-                  max={10}
-                  type="submit"
-                  disabled={busy}
-                  className="tn-btn tn-btn-primary w-full py-3.5 !mt-5"
-                >
-                  {busy
-                    ? "Authenticating…"
-                    : tab === "signup"
-                      ? "Create account"
-                      : "Sign in"}
-                </Tilt>
-              </form>
+                  {showEmail && (
+                    <form
+                      onSubmit={handleEmailSubmit}
+                      className="tn-z1 tn-3d space-y-3 mt-4"
+                    >
+                      <div className="flex gap-1">
+                        {["signup", "signin"].map((t) => (
+                          <button
+                            key={t}
+                            type="button"
+                            onClick={() => setTab(t)}
+                            className={cn(
+                              "tn-hud flex-1 !py-2.5",
+                              tab === t && "tn-hud-on",
+                            )}
+                          >
+                            {t === "signup" ? "Sign up" : "Sign in"}
+                          </button>
+                        ))}
+                      </div>
+                      <input
+                        type="email"
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        placeholder="you@example.com"
+                        aria-label="Email"
+                        autoComplete="email"
+                        className="tn-input"
+                      />
+                      <input
+                        type="password"
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        placeholder="password"
+                        aria-label="Password"
+                        autoComplete={
+                          tab === "signup" ? "new-password" : "current-password"
+                        }
+                        className="tn-input"
+                      />
+                      <Tilt
+                        as="button"
+                        max={10}
+                        type="submit"
+                        disabled={!!busy}
+                        className="tn-btn tn-btn-ghost w-full py-3.5"
+                      >
+                        {busy === "email"
+                          ? "Authenticating…"
+                          : tab === "signup"
+                            ? "Create account"
+                            : "Sign in"}
+                      </Tilt>
+                    </form>
+                  )}
+                </>
+              )}
             </Tilt>
           </motion.div>
         </motion.div>

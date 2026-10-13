@@ -1,6 +1,11 @@
 # Firebase Setup — Odyssey
 
-The Firebase config lives at the top of `src/app.jsx` (`firebaseConfig`). Enable **Authentication → Email/Password** and **Firestore** in the Firebase Console.
+The Firebase config lives at the top of `src/app.jsx` (`firebaseConfig`). Enable **Firestore** in the Firebase Console, then under **Authentication → Sign-in method** enable:
+
+- **Google** — the primary sign-in (popup). Set a project support email when prompted.
+- **Email/Password** — the fallback option in the sign-in modal.
+
+Under **Authentication → Settings → Authorized domains**, add every domain the site is served from (for example `yourname.github.io`). `localhost` is authorized by default; a domain missing from this list fails with "ACCESS DENIED - DOMAIN NOT AUTHORIZED".
 
 ## Collections
 
